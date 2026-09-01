@@ -62,7 +62,7 @@ executable = EXE(
     strip=False,
     upx=False,
     console=False,
-    target_arch="arm64",
+    target_arch=os.environ.get("CODEXRELAY_TARGET_ARCH", "arm64"),
 )
 
 collected = COLLECT(

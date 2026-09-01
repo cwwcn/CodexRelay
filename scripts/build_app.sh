@@ -5,6 +5,7 @@ project_dir=${0:A:h:h}
 cd "$project_dir"
 
 export CODEXRELAY_BUILD_TIME=${CODEXRELAY_BUILD_TIME:-$(date -u '+%Y-%m-%d %H:%M UTC')}
+export CODEXRELAY_TARGET_ARCH=${CODEXRELAY_TARGET_ARCH:-arm64}
 
 dist_dir=${CODEXRELAY_DIST_DIR:-"$project_dir/artifacts/dist"}
 work_dir=${CODEXRELAY_WORK_DIR:-"$project_dir/artifacts/build"}

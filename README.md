@@ -8,7 +8,7 @@ English | [简体中文](README.zh-CN.md) | [Wiki](../../wiki)
 
 > **Current release:** `v0.1.0`
 >
-> This release targets Apple Silicon Macs. The distributed app is ad-hoc signed and is not yet Apple-notarized; the first-launch instructions below explain the one-time macOS security confirmation.
+> This release targets Apple Silicon and Intel Macs. The distributed app is ad-hoc signed and is not yet Apple-notarized; the first-launch instructions below explain the one-time macOS security confirmation.
 
 ## Why CodexRelay
 
@@ -42,7 +42,7 @@ Send a task to your Telegram bot and let your own Mac run Codex in a project you
 
 For the packaged DMG:
 
-- macOS on Apple Silicon;
+- macOS on Apple Silicon or Intel;
 - Codex CLI installed and authenticated on the Mac;
 - A Telegram Bot Token.
 
@@ -50,7 +50,7 @@ For source development, Python 3.12 and `uv` are also required.
 
 ## Install from GitHub Releases
 
-Download the latest `CodexRelay-macos-arm64-<version>.dmg` from [GitHub Releases](https://github.com/cwwcn/CodexRelay/releases), open it, and drag CodexRelay to Applications.
+Download the DMG matching your Mac from [GitHub Releases](https://github.com/cwwcn/CodexRelay/releases): `arm64` for Apple Silicon (M-series) or `x86_64` for Intel. Open it and drag CodexRelay to Applications.
 
 ### First launch on macOS
 
@@ -147,7 +147,7 @@ The build script places intermediate files and the app bundle in `artifacts/` an
 
 - One task runs globally at a time;
 - Telegram is the first connector; the core layer leaves room for future connectors;
-- Apple Silicon is the primary supported architecture;
+- Apple Silicon and Intel are supported through architecture-specific DMG packages;
 - The current update flow opens the official GitHub Release page for user-confirmed downloads; Sparkle installation can be added after signed releases and notarization are in place;
 - Planned work includes signed distribution builds, notarization, automatic updates, and additional connectors.
 

@@ -1,0 +1,55 @@
+name: Build Intel Release Asset
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing GitHub Release tag to receive the Intel DMG"
+        required: true
+        default: "v0.1.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15-intel
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: latest
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --extra gui --extra packaging
+
+      - name: Build Intel app
+        env:
+          CODEXRELAY_TARGET_ARCH: x86_64
+        run: |
+          build_root="$RUNNER_TEMP/codexrelay-build"
+          CODEXRELAY_DIST_DIR="$build_root/dist" CODEXRELAY_WORK_DIR="$build_root/work" ./scripts/build_app.sh
+          echo "CODEXRELAY_APP=$build_root/dist/CodexRelay.app" >> "$GITHUB_ENV"
+
+      - name: Create Intel DMG
+        env:
+          CODEXRELAY_ARCH: x86_64
+          CODEXRELAY_RELEASE_DIR: "$RUNNER_TEMP/release"
+        run: ./scripts/create_dmg.sh "$CODEXRELAY_APP"
+
+      - name: Upload Intel DMG to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          gh release upload "$RELEASE_TAG" "$RUNNER_TEMP/release/CodexRelay-macos-x86_64-v${version}.dmg" --clobber

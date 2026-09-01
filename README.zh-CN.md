@@ -8,7 +8,7 @@ CodexRelay 是一个 macOS 菜单栏应用：Telegram 负责远程交互，本�
 
 > **当前版本：** `v0.1.0`
 >
-> 当前版本面向 Apple Silicon Mac。发布包使用 ad-hoc 签名，尚未完成 Apple 公证；下方提供首次打开时 macOS 安全确认的操作说明。
+> 当前版本同时面向 Apple Silicon 和 Intel Mac。发布包使用 ad-hoc 签名，尚未完成 Apple 公证；下方提供首次打开时 macOS 安全确认的操作说明。
 
 ## 它解决什么问题
 
@@ -42,7 +42,7 @@ CodexRelay 是一个 macOS 菜单栏应用：Telegram 负责远程交互，本�
 
 使用打包 DMG 需要：
 
-- macOS Apple Silicon；
+- macOS Apple Silicon 或 Intel；
 - 已安装并登录本机 Codex CLI；
 - 一个 Telegram Bot Token。
 
@@ -50,7 +50,7 @@ CodexRelay 是一个 macOS 菜单栏应用：Telegram 负责远程交互，本�
 
 ## 从 GitHub Releases 安装
 
-从 [GitHub Releases](https://github.com/cwwcn/CodexRelay/releases) 下载最新的 `CodexRelay-macos-arm64-<版本>.dmg`，打开后将 CodexRelay 拖入“应用程序”文件夹。
+从 [GitHub Releases](https://github.com/cwwcn/CodexRelay/releases) 下载与你的 Mac 架构匹配的 DMG：Apple Silicon（M 系列）选择 `arm64`，Intel 选择 `x86_64`。打开后将 CodexRelay 拖入“应用程序”文件夹。
 
 ### macOS 首次打开
 
@@ -147,7 +147,7 @@ uv sync --extra gui --extra packaging
 
 - 当前全局只执行一个任务；
 - 当前 Telegram 是首个连接器，核心层已为未来其他连接器留出边界；
-- 当前主要支持 Apple Silicon；
+- 当前同时支持 Apple Silicon 和 Intel，发布包按架构分别提供；
 - 当前更新流程会打开官方 GitHub Release 页面，由用户确认下载；正式签名和公证完成后再接入 Sparkle 安装；
 - 后续计划包括正式发行包、公证、自动更新和更多连接器。
 
