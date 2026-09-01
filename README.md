@@ -36,7 +36,7 @@ Send a task to your Telegram bot and let your own Mac run Codex in a project you
 - Telegram cannot add arbitrary local directories;
 - Approval buttons are single-use, and both allow and deny decisions are reported explicitly;
 - CodexRelay never modifies your global `~/.codex/config.toml`;
-- An update-provider interface is reserved for future releases, but the current version does not check for or download updates.
+- A GitHub Releases update checker is available; it only reads release metadata and never replaces the app automatically.
 
 ## Requirements
 
@@ -130,7 +130,7 @@ The build script places intermediate files and the app bundle in `artifacts/` an
 - One task runs globally at a time;
 - Telegram is the first connector; the core layer leaves room for future connectors;
 - Apple Silicon is the primary supported architecture;
-- Online updates are not enabled yet; Sparkle integration will follow a GitHub Release and signing workflow;
+- The current update flow opens the official GitHub Release page for user-confirmed downloads; Sparkle installation can be added after signed releases and notarization are in place;
 - Planned work includes signed distribution builds, notarization, automatic updates, and additional connectors.
 
 ## Documentation

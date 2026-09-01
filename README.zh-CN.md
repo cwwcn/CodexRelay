@@ -36,7 +36,7 @@ CodexRelay 是一个 macOS 菜单栏应用：Telegram 负责远程交互，本�
 - Telegram 不能直接添加任意本机目录；
 - 审批按钮为单次消费，允许和拒绝都会明确反馈；
 - 不修改用户全局 `~/.codex/config.toml`；
-- 自动更新接口已经预留，但当前版本不联网检查、不下载更新。
+- 已提供 GitHub Releases 更新检查；只读取发行版元数据，不会自动替换应用。
 
 ## 使用要求
 
@@ -130,7 +130,7 @@ uv sync --extra gui --extra packaging
 - 当前全局只执行一个任务；
 - 当前 Telegram 是首个连接器，核心层已为未来其他连接器留出边界；
 - 当前主要支持 Apple Silicon；
-- 在线更新暂未启用，待 GitHub Release 和正式签名流程建立后接入 Sparkle；
+- 当前更新流程会打开官方 GitHub Release 页面，由用户确认下载；正式签名和公证完成后再接入 Sparkle 安装；
 - 后续计划包括正式发行包、公证、自动更新和更多连接器。
 
 ## 文档

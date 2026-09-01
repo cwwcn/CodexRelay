@@ -17,6 +17,9 @@ class UpdateState:
     checking: bool = False
     available_version: str | None = None
     message: str = ""
+    release_url: str | None = None
+    published_at: str | None = None
+    release_notes: str | None = None
 
 
 class UpdateProvider(Protocol):
@@ -30,4 +33,4 @@ class UpdateProvider(Protocol):
     @property
     def state(self) -> UpdateState: ...
 
-    def check_for_updates(self) -> None: ...
+    def check_for_updates(self) -> UpdateState: ...

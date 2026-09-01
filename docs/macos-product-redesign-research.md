@@ -143,16 +143,16 @@ Runtime 应发布不可变 `AppStatusSnapshot`，菜单弹层和设置窗口只�
 - 最近错误；
 - 可执行命令的 enabled/disabled 状态。
 
-## 5. 自动更新预留
+## 5. 自动更新与发行
 
-本轮不接入网络更新，但应完成以下接口准备：
+当前版本已接入只读 GitHub Releases 检查，不自动下载或替换应用；正式安装更新仍需签名、公证和 Sparkle 发布链路。实现与规划如下：
 
 1. 版本号收敛为单一来源，并在构建时写入 Info.plist。
-2. 增加 `UpdateProvider`、`UpdateState` 和 release channel 数据模型；默认使用 disabled provider。
+2. 增加 `UpdateProvider`、`UpdateState` 和 release channel 数据模型；当前使用 GitHub Releases 元数据 provider。
 3. Info.plist 构建器预留 Sparkle feed、公钥和自动检查键，但未配置时不写入正式包。
-4. 设置窗口预留“更新”pane 或“关于”中的更新区域，但在功能未启用前不展示假按钮。
+4. 设置窗口的“关于”页展示版本、构建时间、更新频道、手动检查按钮和官方链接。
 5. 发布流水线预留 tag → 测试 → arm64 构建 → Developer ID 签名 → 公证 → 打包 → Sparkle 签名/appcast → GitHub Release。
-6. 稳定版与测试版使用不同 appcast；开发版和 ad-hoc 包永不自动更新。
+6. 稳定版与测试版使用不同频道；开发版和 ad-hoc 包只允许检查并打开 Release 页面，不执行静默安装。
 
 ## 6. 推荐实施顺序
 

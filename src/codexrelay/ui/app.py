@@ -74,8 +74,13 @@ from codexrelay.settings import AppSection, Settings, SettingsStore
 from codexrelay.single_instance import AlreadyRunningError, SingleInstanceLock
 from codexrelay.startup import StartupService
 from codexrelay.ui.state import AppStatusSnapshot, RuntimeState
-from codexrelay.updates import DisabledUpdateProvider, UpdateProvider
-from codexrelay.version import __version__
+from codexrelay.updates import (
+    GitHubReleaseUpdateProvider,
+    UpdateChannel,
+    UpdateProvider,
+    UpdateState,
+)
+from codexrelay.version import __build_time__, __version__
 
 AsyncFactory = Callable[[], Coroutine[Any, Any, object]]
 LOGGER = logging.getLogger("codexrelay.ui")
@@ -448,6 +453,7 @@ class SettingsWindow(QMainWindow):
         self.model_project_id: str | None = None
         self._updating_model_controls = False
         self._workers: set[AsyncWorker] = set()
+        self.update_provider: UpdateProvider | None = None
         self.setWindowTitle("CodexRelay")
         self.setMinimumSize(760, 620)
         self.resize(800, 660)
@@ -523,7 +529,7 @@ class SettingsWindow(QMainWindow):
         self.navigation.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.navigation.setSpacing(4)
         self.navigation.setFixedHeight(38)
-        self.navigation.addItems(["Telegram", "Codex", "项目", "系统"])
+        self.navigation.addItems(["Telegram", "Codex", "项目", "系统", "关于"])
         self.navigation.setCurrentRow(0)
         outer.addWidget(self.navigation)
 
@@ -532,6 +538,7 @@ class SettingsWindow(QMainWindow):
         self.pages.addWidget(self._codex_page())
         self.pages.addWidget(self._projects_page())
         self.pages.addWidget(self._system_page())
+        self.pages.addWidget(self._about_page())
         self.navigation.currentRowChanged.connect(self._navigation_changed)
         outer.addWidget(self.pages, 1)
         self.overview_message = QLabel("")
@@ -546,6 +553,17 @@ class SettingsWindow(QMainWindow):
             self._load_model_configuration()
         elif index == 2:
             self._load_projects()
+
+    def set_update_provider(self, provider: UpdateProvider) -> None:
+        self.update_provider = provider
+        if isinstance(provider, GitHubReleaseUpdateProvider):
+            channel = (
+                UpdateChannel.BETA
+                if self.settings.app.update_channel == UpdateChannel.BETA.value
+                else UpdateChannel.STABLE
+            )
+            provider.set_channel(channel)
+        self._refresh_update_view()
 
     @staticmethod
     def _rail_connector() -> QLabel:
@@ -733,6 +751,183 @@ class SettingsWindow(QMainWindow):
         layout.addLayout(directory_buttons)
         layout.addStretch(1)
         return page
+
+    def _about_page(self) -> QWidget:
+        page, layout = self._page("关于", "CodexRelay 的版本、发行信息与更新")
+
+        hero = QFrame()
+        hero.setObjectName("aboutHero")
+        hero_layout = QHBoxLayout(hero)
+        hero_layout.setContentsMargins(20, 18, 20, 18)
+        hero_layout.setSpacing(16)
+        logo = QLabel()
+        logo.setPixmap(make_icon().pixmap(QSize(64, 64)))
+        logo.setFixedSize(64, 64)
+        hero_layout.addWidget(logo, alignment=Qt.AlignmentFlag.AlignTop)
+        identity = QVBoxLayout()
+        identity.setSpacing(3)
+        app_name = QLabel("CodexRelay")
+        app_name.setObjectName("aboutAppName")
+        tagline = QLabel("Telegram 与本机 Codex 之间的本地安全中继")
+        tagline.setObjectName("aboutTagline")
+        version = QLabel(f"版本 {__version__}")
+        version.setObjectName("aboutVersion")
+        build = QLabel(f"构建时间：{__build_time__}")
+        build.setObjectName("aboutMeta")
+        identity.addWidget(app_name)
+        identity.addWidget(tagline)
+        identity.addSpacing(5)
+        identity.addWidget(version)
+        identity.addWidget(build)
+        hero_layout.addLayout(identity, 1)
+        layout.addWidget(hero)
+
+        update_title = QLabel("更新")
+        update_title.setObjectName("aboutSectionTitle")
+        layout.addWidget(update_title)
+        update_card = QFrame()
+        update_card.setObjectName("aboutCard")
+        update_layout = QVBoxLayout(update_card)
+        update_layout.setContentsMargins(16, 12, 16, 12)
+        update_layout.setSpacing(0)
+
+        auto_row = QHBoxLayout()
+        auto_label = QLabel("自动检查更新")
+        auto_label.setObjectName("aboutRowTitle")
+        self.auto_update_checks = QCheckBox()
+        self.auto_update_checks.setChecked(self.settings.app.update_checks_automatically)
+        self.auto_update_checks.toggled.connect(self._save_update_settings)
+        auto_row.addWidget(auto_label)
+        auto_row.addStretch(1)
+        auto_row.addWidget(self.auto_update_checks)
+        update_layout.addLayout(auto_row)
+
+        channel_row = QHBoxLayout()
+        channel_label = QLabel("更新频道")
+        channel_label.setObjectName("aboutRowTitle")
+        self.update_channel_combo = ChoiceButton()
+        self.update_channel_combo.setFixedWidth(150)
+        self.update_channel_combo.addItem("稳定版", UpdateChannel.STABLE.value)
+        self.update_channel_combo.addItem("测试版", UpdateChannel.BETA.value)
+        self.update_channel_combo.setCurrentIndex(
+            1 if self.settings.app.update_channel == UpdateChannel.BETA.value else 0
+        )
+        self.update_channel_combo.currentIndexChanged.connect(self._save_update_settings)
+        channel_row.addWidget(channel_label)
+        channel_row.addStretch(1)
+        channel_row.addWidget(self.update_channel_combo)
+        update_layout.addLayout(channel_row)
+
+        divider = QFrame()
+        divider.setObjectName("aboutDivider")
+        divider.setFrameShape(QFrame.Shape.HLine)
+        update_layout.addWidget(divider)
+
+        check_row = QHBoxLayout()
+        self.update_status = QLabel("尚未检查更新")
+        self.update_status.setObjectName("aboutMeta")
+        self.check_updates_button = QPushButton("检查更新…")
+        self.check_updates_button.setObjectName("secondaryButton")
+        self.check_updates_button.clicked.connect(self.check_for_updates)
+        check_row.addWidget(self.update_status, 1)
+        check_row.addWidget(self.check_updates_button)
+        update_layout.addLayout(check_row)
+        layout.addWidget(update_card)
+
+        links_title = QLabel("链接")
+        links_title.setObjectName("aboutSectionTitle")
+        layout.addWidget(links_title)
+        links_card = QFrame()
+        links_card.setObjectName("aboutCard")
+        links_layout = QVBoxLayout(links_card)
+        links_layout.setContentsMargins(16, 6, 16, 6)
+        for label, url in (
+            ("GitHub 仓库", "https://github.com/cwwcn/CodexRelay"),
+            ("GitHub Releases", "https://github.com/cwwcn/CodexRelay/releases"),
+            ("MIT License", "https://github.com/cwwcn/CodexRelay/blob/main/LICENSE"),
+        ):
+            link = QPushButton(f"{label}  ↗")
+            link.setObjectName("linkButton")
+            link.setCursor(Qt.CursorShape.PointingHandCursor)
+            link.clicked.connect(
+                lambda _checked=False, target=url: QDesktopServices.openUrl(QUrl(target))
+            )
+            links_layout.addWidget(link)
+        layout.addWidget(links_card)
+
+        footer = QLabel("CodexRelay 保持本地优先：更新检查只读取官方 GitHub Releases 元数据。")
+        footer.setObjectName("hint")
+        footer.setWordWrap(True)
+        layout.addWidget(footer)
+        layout.addStretch(1)
+        return page
+
+    def _save_update_settings(self, _value: object = None) -> None:
+        if not hasattr(self, "auto_update_checks"):
+            return
+        channel = str(self.update_channel_combo.currentData() or UpdateChannel.STABLE.value)
+        self.settings = Settings(
+            app=AppSection(
+                auto_connect=self.settings.app.auto_connect,
+                launch_at_login=self.settings.app.launch_at_login,
+                prevent_sleep_while_running=self.settings.app.prevent_sleep_while_running,
+                update_checks_automatically=self.auto_update_checks.isChecked(),
+                update_channel=channel,
+            ),
+            telegram=self.settings.telegram,
+            projects=self.settings.projects,
+        )
+        self.settings_store.save(self.settings)
+        if isinstance(self.update_provider, GitHubReleaseUpdateProvider):
+            self.update_provider.set_channel(
+                UpdateChannel.BETA if channel == UpdateChannel.BETA.value else UpdateChannel.STABLE
+            )
+        self._refresh_update_view()
+
+    def _refresh_update_view(self) -> None:
+        if not hasattr(self, "update_status"):
+            return
+        provider = self.update_provider
+        if provider is None:
+            self.update_status.setText("更新检查将在正式发行版中启用")
+            self.check_updates_button.setEnabled(False)
+            return
+        state = provider.state
+        self.update_status.setText(state.message or "尚未检查更新")
+        self.check_updates_button.setEnabled(not state.checking)
+
+    def check_for_updates(self) -> None:
+        provider = self.update_provider
+        if provider is None:
+            self._refresh_update_view()
+            return
+        self.check_updates_button.setEnabled(False)
+        self.update_status.setText("正在检查 GitHub Releases…")
+
+        def finished(value: object) -> None:
+            if not isinstance(value, UpdateState):
+                self.update_status.setText("更新检查返回了无效结果")
+                self.check_updates_button.setEnabled(True)
+                return
+            state = value
+            self.update_status.setText(state.message)
+            self.check_updates_button.setEnabled(True)
+            release_url = getattr(state, "release_url", None)
+            if getattr(state, "available_version", None) and release_url:
+                box = QMessageBox(self)
+                box.setWindowTitle("发现新版本")
+                box.setText(f"CodexRelay {state.available_version} 已发布。")
+                box.setInformativeText("当前版本会打开官方 Releases 页面，由你确认下载和安装。")
+                open_button = box.addButton("打开 Releases", QMessageBox.ButtonRole.AcceptRole)
+                box.addButton("稍后再说", QMessageBox.ButtonRole.RejectRole)
+                box.exec()
+                if box.clickedButton() is open_button:
+                    QDesktopServices.openUrl(QUrl(str(release_url)))
+
+        async def check() -> object:
+            return provider.check_for_updates()
+
+        self._run(check, finished=finished)
 
     def _load_codex_status(self) -> None:
         environment = codex_subprocess_environment()
@@ -1060,6 +1255,8 @@ class SettingsWindow(QMainWindow):
                 auto_connect=self.auto_connect.isChecked(),
                 launch_at_login=self.launch_at_login.isChecked(),
                 prevent_sleep_while_running=self.prevent_sleep.isChecked(),
+                update_checks_automatically=self.settings.app.update_checks_automatically,
+                update_channel=self.settings.app.update_channel,
             ),
             telegram=self.settings.telegram,
             projects=self.settings.projects,
@@ -1105,6 +1302,7 @@ class TrayApplication(QObject):
         self.paths = AppPaths.default()
         self.paths.ensure()
         self.pool = QThreadPool.globalInstance()
+        self.update_provider: UpdateProvider = GitHubReleaseUpdateProvider()
         self.window = SettingsWindow(self.paths, self.pool)
         self.runtime_thread: RuntimeThread | None = None
         self.restart_requested = False
@@ -1112,7 +1310,7 @@ class TrayApplication(QObject):
         self._status_refresh_running = False
         self._workers: set[AsyncWorker] = set()
         self.snapshot = AppStatusSnapshot()
-        self.update_provider: UpdateProvider = DisabledUpdateProvider()
+        self.window.set_update_provider(self.update_provider)
 
         self.tray = QSystemTrayIcon(make_icon(), self)
         self.tray.setToolTip("CodexRelay")
@@ -1173,6 +1371,8 @@ class TrayApplication(QObject):
         self.status_timer.timeout.connect(self.refresh_snapshot)
         self.status_timer.start()
         self.refresh_snapshot()
+        if self.window.settings.app.update_checks_automatically:
+            QTimer.singleShot(1500, self.window.check_for_updates)
         if self.window.settings.app.auto_connect:
             self.start_runtime()
 
@@ -1183,11 +1383,8 @@ class TrayApplication(QObject):
         self.window.activateWindow()
 
     def show_about(self) -> None:
-        QMessageBox.about(
-            self.window,
-            "关于 CodexRelay",
-            f"CodexRelay {__version__}\n\nTelegram 与本机 Codex 之间的本地安全中继。",
-        )
+        self.show_window()
+        self.window.navigation.setCurrentRow(4)
 
     def _activated(self, _reason: QSystemTrayIcon.ActivationReason) -> None:
         # On macOS, a tray context menu opens on the primary click. Keeping this
@@ -1525,6 +1722,20 @@ QListWidget#navigation { background: transparent; border: 0; outline: 0; }
 QListWidget#navigation::item { padding: 8px 14px; border-radius: 8px; }
 QListWidget#navigation::item:selected { background: #D5E5F6; color: #174A78; }
 QLabel#pageTitle { color: #18202A; font-size: 22px; font-weight: 650; min-height: 28px; }
+QFrame#aboutHero { background: #EEF4F8; border: 1px solid #D9E5EC; border-radius: 16px; }
+QLabel#aboutAppName { color: #18202A; font-size: 23px; font-weight: 700; }
+QLabel#aboutTagline { color: #536574; font-size: 13px; }
+QLabel#aboutVersion { color: #246AA5; font-size: 13px; font-weight: 700; }
+QLabel#aboutMeta { color: #74818B; font-size: 11px; }
+QLabel#aboutSectionTitle { color: #18202A; font-size: 16px; font-weight: 700; padding-top: 7px; }
+QFrame#aboutCard { background: #FFFFFF; border: 1px solid #DDE3E9; border-radius: 14px; }
+QLabel#aboutRowTitle { color: #273541; font-size: 13px; font-weight: 600; padding: 9px 0; }
+QFrame#aboutDivider { color: #E3E8ED; max-height: 1px; }
+QPushButton#secondaryButton { background: #F3F6F8; color: #246AA5; border-color: #C9D8E3; }
+QPushButton#secondaryButton:hover { background: #EAF2F8; border-color: #9CB4C8; }
+QPushButton#linkButton { background: transparent; color: #246AA5; border: 0; border-radius: 7px;
+    text-align: left; padding: 9px 2px; font-size: 13px; }
+QPushButton#linkButton:hover { background: #F0F5F8; color: #174A78; }
 QLabel#inlineStatus { color: #66727F; font-size: 11px; padding: 3px 2px; }
 QLabel#heroStatus { background: #EAF2FA; color: #174A78; padding: 18px; border-radius: 12px;
     font-size: 16px; font-weight: 600; }

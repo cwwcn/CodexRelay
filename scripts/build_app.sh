@@ -4,6 +4,8 @@ set -euo pipefail
 project_dir=${0:A:h:h}
 cd "$project_dir"
 
+export CODEXRELAY_BUILD_TIME=${CODEXRELAY_BUILD_TIME:-$(date -u '+%Y-%m-%d %H:%M UTC')}
+
 dist_dir=${CODEXRELAY_DIST_DIR:-"$project_dir/artifacts/dist"}
 work_dir=${CODEXRELAY_WORK_DIR:-"$project_dir/artifacts/build"}
 app_path="$dist_dir/CodexRelay.app"

@@ -86,6 +86,7 @@ application = BUNDLE(
         "LSUIElement": True,
         "NSHighResolutionCapable": True,
         "NSHumanReadableCopyright": "Personal build",
+        "CodexRelayBuildTime": os.environ.get("CODEXRELAY_BUILD_TIME", "Packaged build"),
         **optional_update_plist(),
     },
 )
