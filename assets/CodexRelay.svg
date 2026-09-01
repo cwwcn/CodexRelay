@@ -1,14 +1,29 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
   <defs>
-    <linearGradient id="background" x1="160" y1="120" x2="850" y2="900" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#377DB7"/>
-      <stop offset="1" stop-color="#174A78"/>
+    <linearGradient id="background" x1="168" y1="112" x2="856" y2="924" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2D82B7"/>
+      <stop offset="0.52" stop-color="#1B5E8C"/>
+      <stop offset="1" stop-color="#102F4C"/>
     </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="translate(332 210) rotate(48) scale(565 480)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8ED8F0" stop-opacity="0.25"/>
+      <stop offset="1" stop-color="#8ED8F0" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="shadow" x="58" y="60" width="908" height="908" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="18" stdDeviation="20" flood-color="#071A2A" flood-opacity="0.28"/>
+    </filter>
   </defs>
-  <rect x="80" y="80" width="864" height="864" rx="216" fill="url(#background)"/>
-  <path d="M300 555c-28-54-33-119-10-178 42-108 163-162 271-120 62 24 108 75 128 136"
-        fill="none" stroke="#F7FAFC" stroke-width="72" stroke-linecap="round"/>
-  <path d="M271 650h482" fill="none" stroke="#F7FAFC" stroke-width="72" stroke-linecap="round"/>
-  <path d="M512 650v152" fill="none" stroke="#F7FAFC" stroke-width="72" stroke-linecap="round"/>
-  <circle cx="705" cy="390" r="58" fill="#8FE0BD"/>
+  <g filter="url(#shadow)">
+    <rect x="80" y="80" width="864" height="864" rx="216" fill="url(#background)"/>
+    <rect x="80" y="80" width="864" height="864" rx="216" fill="url(#glow)"/>
+    <rect x="81.5" y="81.5" width="861" height="861" rx="214.5" fill="none" stroke="#FFFFFF" stroke-opacity="0.14" stroke-width="3"/>
+  </g>
+
+  <!-- Two code-like endpoints meet at a small relay node. -->
+  <g fill="none" stroke="#F8FBFD" stroke-width="68" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M438 304H370C318 304 286 336 286 388V636C286 688 318 720 370 720H438"/>
+    <path d="M586 304H654C706 304 738 336 738 388V636C738 688 706 720 654 720H586"/>
+    <path d="M438 512H586"/>
+  </g>
+  <circle cx="512" cy="512" r="54" fill="#72E2BD" stroke="#F8FBFD" stroke-width="16"/>
 </svg>

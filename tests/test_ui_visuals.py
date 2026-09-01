@@ -10,6 +10,7 @@ from codexrelay.ui.app import (
     AsyncWorker,
     ChoiceButton,
     MenuOverview,
+    QuitConfirmationDialog,
     ToggleSwitch,
     make_icon,
 )
@@ -28,6 +29,24 @@ def test_tray_icon_is_a_macos_adaptive_mask() -> None:
     assert icon.isMask()
     assert not pixmap.isNull()
     assert pixmap.toImage().hasAlphaChannel()
+
+
+def test_quit_confirmation_is_compact_and_distinguishes_active_task() -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    application = QApplication.instance() or QApplication([])
+
+    idle = QuitConfirmationDialog(active_count=0)
+    active = QuitConfirmationDialog(active_count=1)
+
+    assert application is not None
+    assert idle.title_label.text() == "退出 CodexRelay？"
+    assert idle.confirm_button.text() == "退出"
+    assert idle.confirm_button.objectName() == "quitPrimaryButton"
+    assert active.title_label.text() == "当前任务仍在运行"
+    assert active.confirm_button.text() == "停止并退出"
+    assert active.confirm_button.objectName() == "quitDangerButton"
+    assert idle.size().width() <= 448
+    assert active.size().width() <= 448
 
 
 def test_project_selection_has_explicit_high_contrast_colors() -> None:

@@ -26,11 +26,14 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QAction,
     QColor,
+    QCursor,
     QDesktopServices,
     QFontDatabase,
     QIcon,
     QKeySequence,
+    QLinearGradient,
     QPainter,
+    QPainterPath,
     QPaintEvent,
     QPen,
     QPixmap,
@@ -39,8 +42,10 @@ from PySide6.QtWidgets import (
     QAbstractButton,
     QApplication,
     QCheckBox,
+    QDialog,
     QFileDialog,
     QFrame,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -303,30 +308,146 @@ class TaskStatusDot(QWidget):
 
 
 class AboutMark(QWidget):
-    """Compact colored brand mark for the About page."""
+    """Scalable brand mark shared by the About and confirmation surfaces."""
 
-    def __init__(self) -> None:
+    def __init__(self, size: int = 72) -> None:
         super().__init__()
-        self.setFixedSize(72, 72)
+        self.setFixedSize(size, size)
 
     def paintEvent(self, event: QPaintEvent) -> None:
         del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        side = float(min(self.width(), self.height()))
+        painter.translate((self.width() - side) / 2, (self.height() - side) / 2)
+        painter.scale(side / 72.0, side / 72.0)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#246AA5"))
-        painter.drawRoundedRect(self.rect(), 18, 18)
-        pen = QPen(QColor("#FFFFFF"), 6)
+        gradient = QLinearGradient(9, 6, 63, 67)
+        gradient.setColorAt(0, QColor("#287CB1"))
+        gradient.setColorAt(0.55, QColor("#1B5B88"))
+        gradient.setColorAt(1, QColor("#102F4C"))
+        painter.setBrush(gradient)
+        painter.drawRoundedRect(QRectF(0, 0, 72, 72), 17, 17)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(255, 255, 255, 28), 1))
+        painter.drawRoundedRect(QRectF(0.5, 0.5, 71, 71), 16.5, 16.5)
+
+        pen = QPen(QColor("#F8FBFD"), 4.8)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawArc(QRectF(18, 14, 36, 34), 32 * 16, 292 * 16)
-        painter.drawLine(QLineF(17, 48, 55, 48))
-        painter.drawLine(QLineF(36, 48, 36, 59))
+
+        left = QPainterPath()
+        left.moveTo(31, 17)
+        left.lineTo(27, 17)
+        left.cubicTo(21.5, 17, 19, 20.5, 19, 26)
+        left.lineTo(19, 46)
+        left.cubicTo(19, 51.5, 21.5, 55, 27, 55)
+        left.lineTo(31, 55)
+        painter.drawPath(left)
+
+        right = QPainterPath()
+        right.moveTo(41, 17)
+        right.lineTo(45, 17)
+        right.cubicTo(50.5, 17, 53, 20.5, 53, 26)
+        right.lineTo(53, 46)
+        right.cubicTo(53, 51.5, 50.5, 55, 45, 55)
+        right.lineTo(41, 55)
+        painter.drawPath(right)
+        painter.drawLine(QLineF(31, 36, 41, 36))
+
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#8FE0BD"))
-        painter.drawEllipse(QRectF(47, 16, 10, 10))
+        painter.setBrush(QColor("#72E2BD"))
+        painter.drawEllipse(QRectF(32, 32, 8, 8))
+
+
+class QuitConfirmationDialog(QDialog):
+    """Compact, frameless confirmation card tailored to a menu-bar app."""
+
+    def __init__(self, *, active_count: int, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("quitDialog")
+        self.setWindowTitle("退出 CodexRelay")
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        self.setWindowModality(Qt.WindowModality.ApplicationModal)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setFixedSize(448, 244 if active_count else 232)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(18, 18, 18, 22)
+        outer.setSpacing(0)
+        card = QFrame()
+        card.setObjectName("quitCard")
+        shadow = QGraphicsDropShadowEffect(card)
+        shadow.setBlurRadius(38)
+        shadow.setOffset(0, 10)
+        shadow.setColor(QColor(15, 31, 47, 58))
+        card.setGraphicsEffect(shadow)
+        outer.addWidget(card)
+
+        content = QVBoxLayout(card)
+        content.setContentsMargins(22, 20, 22, 18)
+        content.setSpacing(0)
+
+        heading = QHBoxLayout()
+        heading.setSpacing(14)
+        heading.addWidget(AboutMark(44), alignment=Qt.AlignmentFlag.AlignTop)
+        copy = QVBoxLayout()
+        copy.setSpacing(5)
+        self.title_label = QLabel("当前任务仍在运行" if active_count else "退出 CodexRelay？")
+        self.title_label.setObjectName("quitTitle")
+        self.message_label = QLabel(
+            "退出会中断当前 Codex 任务。\n"
+            "任务会标记为“已中断”。项目和会话数据会保留。"
+            if active_count
+            else "退出后，Telegram 将暂时无法连接这台 Mac。\n"
+            "已保存的项目和会话会保留到下次启动。"
+        )
+        self.message_label.setObjectName("quitMessage")
+        self.message_label.setWordWrap(True)
+        copy.addWidget(self.title_label)
+        copy.addWidget(self.message_label)
+        heading.addLayout(copy, 1)
+        content.addLayout(heading)
+        content.addStretch(1)
+
+        divider = QFrame()
+        divider.setObjectName("quitDivider")
+        divider.setFrameShape(QFrame.Shape.HLine)
+        content.addWidget(divider)
+        content.addSpacing(14)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(10)
+        actions.addStretch(1)
+        self.cancel_button = QPushButton("取消")
+        self.cancel_button.setObjectName("quitCancelButton")
+        self.cancel_button.setFixedHeight(34)
+        self.cancel_button.setMinimumWidth(82)
+        self.cancel_button.clicked.connect(self.reject)
+        self.cancel_button.setDefault(True)
+        self.cancel_button.setFocus()
+        self.confirm_button = QPushButton("停止并退出" if active_count else "退出")
+        self.confirm_button.setObjectName(
+            "quitDangerButton" if active_count else "quitPrimaryButton"
+        )
+        self.confirm_button.setFixedHeight(34)
+        self.confirm_button.setMinimumWidth(96 if active_count else 82)
+        self.confirm_button.setAutoDefault(False)
+        self.confirm_button.clicked.connect(self.accept)
+        actions.addWidget(self.cancel_button)
+        actions.addWidget(self.confirm_button)
+        content.addLayout(actions)
+
+    def showEvent(self, event: Any) -> None:
+        super().showEvent(event)
+        screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
+        if screen is None:
+            return
+        frame = self.frameGeometry()
+        frame.moveCenter(screen.availableGeometry().center())
+        self.move(frame.topLeft())
 
 
 class ToggleSwitch(QAbstractButton):
@@ -1618,22 +1739,8 @@ class TrayApplication(QObject):
         self._run(load, finished)
 
     def _show_quit_confirmation(self, active_count: int) -> None:
-        box = QMessageBox(self.window)
-        box.setIcon(QMessageBox.Icon.Warning if active_count else QMessageBox.Icon.Question)
-        box.setWindowTitle("退出 CodexRelay")
-        if active_count:
-            box.setText("当前任务仍在运行")
-            box.setInformativeText("退出会中断 Codex，任务会记录为“已中断”。")
-            exit_label = "停止任务并退出"
-        else:
-            box.setText("退出 CodexRelay？")
-            box.setInformativeText("退出后，Telegram 将无法继续连接这台 Mac。")
-            exit_label = "退出"
-        cancel = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
-        exit_button = box.addButton(exit_label, QMessageBox.ButtonRole.DestructiveRole)
-        box.setDefaultButton(cancel)
-        box.exec()
-        if box.clickedButton() is exit_button:
+        dialog = QuitConfirmationDialog(active_count=active_count, parent=self.window)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
             self._begin_quit()
 
     def _begin_quit(self) -> None:
@@ -1695,13 +1802,30 @@ def make_icon() -> QIcon:
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor(Qt.GlobalColor.black), 2.4)
+        pen = QPen(QColor(Qt.GlobalColor.black), 2.1)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         painter.setPen(pen)
-        painter.drawArc(QRectF(4.0, 2.5, 14.0, 13.5), 32 * 16, 292 * 16)
-        painter.drawLine(QLineF(5.0, 16.2, 17.0, 16.2))
-        painter.drawLine(QLineF(11.0, 16.2, 11.0, 20.0))
+        left = QPainterPath()
+        left.moveTo(9, 4)
+        left.lineTo(7.2, 4)
+        left.cubicTo(5, 4, 4, 5.5, 4, 7.6)
+        left.lineTo(4, 14.4)
+        left.cubicTo(4, 16.5, 5, 18, 7.2, 18)
+        left.lineTo(9, 18)
+        painter.drawPath(left)
+        right = QPainterPath()
+        right.moveTo(13, 4)
+        right.lineTo(14.8, 4)
+        right.cubicTo(17, 4, 18, 5.5, 18, 7.6)
+        right.lineTo(18, 14.4)
+        right.cubicTo(18, 16.5, 17, 18, 14.8, 18)
+        right.lineTo(13, 18)
+        painter.drawPath(right)
+        painter.drawLine(QLineF(9, 11, 13, 11))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(Qt.GlobalColor.black)
+        painter.drawEllipse(QRectF(9.9, 9.9, 2.2, 2.2))
         painter.end()
         icon.addPixmap(pixmap)
     # macOS renders mask icons as Template images and automatically switches
@@ -1721,6 +1845,24 @@ def format_bytes(value: int) -> str:
 
 
 STYLE_SHEET = """
+QDialog#quitDialog { background: transparent; }
+QFrame#quitCard { background: rgba(250, 251, 253, 250); border: 1px solid rgba(194, 204, 214, 180);
+    border-radius: 18px; }
+QLabel#quitTitle { color: #1C1C1E; font-size: 17px; font-weight: 700; }
+QLabel#quitMessage { color: #636A73; font-size: 13px; line-height: 1.35; }
+QFrame#quitDivider { background: #E5E7EB; max-height: 1px; border: 0; }
+QPushButton#quitCancelButton, QPushButton#quitPrimaryButton, QPushButton#quitDangerButton {
+    min-height: 34px; padding: 6px 16px; border-radius: 9px; font-size: 13px; font-weight: 600; }
+QPushButton#quitCancelButton { background: rgba(233, 237, 242, 190); color: #30343A;
+    border: 1px solid rgba(190, 199, 208, 170); }
+QPushButton#quitCancelButton:hover { background: rgba(222, 228, 235, 220); }
+QPushButton#quitCancelButton:pressed { background: rgba(211, 218, 226, 230); }
+QPushButton#quitPrimaryButton { background: #1476E8; color: #FFFFFF; border: 1px solid #1476E8; }
+QPushButton#quitPrimaryButton:hover { background: #0D68D2; border-color: #0D68D2; }
+QPushButton#quitPrimaryButton:pressed { background: #095DBD; border-color: #095DBD; }
+QPushButton#quitDangerButton { background: #D94B4B; color: #FFFFFF; border: 1px solid #D94B4B; }
+QPushButton#quitDangerButton:hover { background: #C73F3F; border-color: #C73F3F; }
+QPushButton#quitDangerButton:pressed { background: #B73535; border-color: #B73535; }
 QWidget#root { background: #F3F5F7; color: #18202A; }
 QLabel#eyebrow { color: #57708C; font-size: 10px; font-weight: 700; letter-spacing: 2px; }
 QLabel#windowTitle { font-size: 30px; font-weight: 650; }

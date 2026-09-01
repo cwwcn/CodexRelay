@@ -4,12 +4,14 @@ import subprocess
 from pathlib import Path
 
 from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QImage, QLinearGradient, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QImage, QPainter
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QApplication
 
 ROOT = Path(__file__).resolve().parents[1]
 ICONSET = ROOT / "artifacts" / "icon-work" / "CodexRelay.iconset"
 OUTPUT = ROOT / "assets" / "CodexRelay.icns"
+SOURCE = ROOT / "assets" / "CodexRelay.svg"
 
 
 def render(size: int, destination: Path) -> None:
@@ -17,31 +19,10 @@ def render(size: int, destination: Path) -> None:
     image.fill(Qt.GlobalColor.transparent)
     painter = QPainter(image)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    scale = size / 1024
-    rounded = QPainterPath()
-    rounded.addRoundedRect(
-        QRectF(80 * scale, 80 * scale, 864 * scale, 864 * scale),
-        216 * scale,
-        216 * scale,
-    )
-    gradient = QLinearGradient(160 * scale, 120 * scale, 850 * scale, 900 * scale)
-    gradient.setColorAt(0, QColor("#377DB7"))
-    gradient.setColorAt(1, QColor("#174A78"))
-    painter.fillPath(rounded, gradient)
-
-    stroke = QPen(QColor("#F7FAFC"), max(2, 72 * scale))
-    stroke.setCapStyle(Qt.PenCapStyle.RoundCap)
-    painter.setPen(stroke)
-    painter.drawArc(
-        QRectF(270 * scale, 230 * scale, 450 * scale, 390 * scale),
-        25 * 16,
-        285 * 16,
-    )
-    painter.drawLine(271 * scale, 650 * scale, 753 * scale, 650 * scale)
-    painter.drawLine(512 * scale, 650 * scale, 512 * scale, 802 * scale)
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(QColor("#8FE0BD"))
-    painter.drawEllipse(QRectF(647 * scale, 332 * scale, 116 * scale, 116 * scale))
+    renderer = QSvgRenderer(str(SOURCE))
+    if not renderer.isValid():
+        raise RuntimeError(f"invalid icon source: {SOURCE}")
+    renderer.render(painter, QRectF(0, 0, size, size))
     painter.end()
     if not image.save(str(destination), "PNG"):
         raise RuntimeError(f"failed to save {destination}")
