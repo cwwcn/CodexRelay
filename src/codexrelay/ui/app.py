@@ -388,7 +388,8 @@ class QuitConfirmationDialog(QDialog):
         heading.setSpacing(14)
         heading.addWidget(AboutMark(44), alignment=Qt.AlignmentFlag.AlignTop)
         copy = QVBoxLayout()
-        copy.setSpacing(5)
+        # Keep the consequence text visually separate from the primary action.
+        copy.setSpacing(10)
         self.title_label = QLabel("当前任务仍在运行" if active_count else "退出 CodexRelay？")
         self.title_label.setObjectName("quitTitle")
         self.message_label = QLabel(
