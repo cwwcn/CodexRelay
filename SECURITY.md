@@ -1,17 +1,27 @@
-# Security Policy
+# Security Policy / 安全策略
 
-## 支持范围
+## Supported versions / 支持范围
 
-当前只支持最新的 `main` 分支和最新的预览构建。项目仍处于 Early Preview 阶段，不建议将未经审计的构建用于高风险或生产环境。
+The latest `main` branch and the latest published release are supported. CodexRelay is a Public Alpha project; do not use an unaudited build for high-risk or production workloads.
 
-## 报告安全问题
+当前支持最新的 `main` 分支和最新公开 Release。CodexRelay 目前是公开 Alpha 项目，不建议将未经审计的构建用于高风险或生产环境。
 
-请不要在公开 Issue 中发布 Token、密钥、可利用细节或包含私人代码的日志。优先使用 GitHub Security Advisories；如果仓库尚未启用该功能，请先提交一个不包含敏感细节的 Issue，说明需要私下联系。
+## Reporting a vulnerability / 报告安全问题
 
-提交报告时请尽量包含：受影响版本、macOS 版本、复现步骤、影响范围和修复建议。
+Do not publish Bot Tokens, Codex credentials, private code, exploitable details, or complete private logs in a public Issue. Use [GitHub private vulnerability reporting](https://github.com/cwwcn/CodexRelay/security/advisories/new) when available. If it is unavailable, open an Issue containing only the minimum non-sensitive summary and ask for a private contact channel.
 
-## 处理原则
+请不要在公开 Issue 中发布 Bot Token、Codex 凭据、私人代码、可利用细节或完整私有日志。优先使用 [GitHub 私密漏洞报告](https://github.com/cwwcn/CodexRelay/security/advisories/new)；如果暂时不可用，请只提交不包含敏感细节的最小摘要，并请求私下联系。
+
+Include the affected version, macOS version and architecture, reproduction steps, impact, and any suggested mitigation.
+
+报告时请尽量提供：受影响版本、macOS 版本与架构、复现步骤、影响范围和修复建议。
+
+## Handling principles / 处理原则
+
+- We will not ask you to disclose a Bot Token or Codex credential.
+- Unfixed exploitable details will not be published before a fix is available.
+- Fixes and their impact will be recorded in `CHANGELOG.md`.
 
 - 不会要求你公开 Bot Token 或 Codex 凭据；
 - 修复前不会公开未修复的利用细节；
-- 修复后会在 CHANGELOG 中记录影响范围和版本。
+- 修复及其影响范围会记录在 `CHANGELOG.md` 中。

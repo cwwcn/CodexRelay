@@ -1,10 +1,20 @@
 # CodexRelay
 
+<p align="center">
+  <img src="assets/CodexRelay.svg" alt="CodexRelay" width="96">
+</p>
+
+<p align="center">
+  <a href="https://github.com/cwwcn/CodexRelay/actions/workflows/ci.yml"><img src="https://github.com/cwwcn/CodexRelay/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI 状态"></a>
+  <a href="https://github.com/cwwcn/CodexRelay/releases/latest"><img src="https://img.shields.io/github/v/release/cwwcn/CodexRelay?display_name=tag&sort=semver" alt="最新版本"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/cwwcn/CodexRelay" alt="MIT License"></a>
+</p>
+
 通过 Telegram 私聊，安全地使用你自己 Mac 上运行的 Codex。
 
 CodexRelay 是一个 macOS 菜单栏应用：Telegram 负责远程交互，本机 Codex 负责执行任务。项目、会话上下文、模型设置和审批状态都保存在本机，切换回项目后可以继续原来的对话。
 
-[English](README.md) | 简体中文 | [Wiki](../../wiki)
+[English](README.md) | 简体中文 | [文档](docs/)
 
 > **当前版本：** `v0.1.0`
 >
@@ -36,7 +46,7 @@ CodexRelay 是一个 macOS 菜单栏应用：Telegram 负责远程交互，本�
 - Telegram 不能直接添加任意本机目录；
 - 审批按钮为单次消费，允许和拒绝都会明确反馈；
 - 不修改用户全局 `~/.codex/config.toml`；
-- 已提供 GitHub Releases 更新检查；自动检查发现新版本后，会在菜单栏面板显示“更新已就绪”。用户点击后，程序选择匹配当前 Mac 架构的 DMG，校验 SHA-256 后打开安装包，由用户完成最后的替换。
+- 已提供 GitHub Releases 更新检查；自动检查发现新版本后，会在菜单栏面板显示“发现新版本，下载更新”。用户点击后，程序选择匹配当前 Mac 架构的 DMG，校验 SHA-256 后打开安装包，由用户完成最后的替换。
 
 ## 使用要求
 
@@ -47,6 +57,8 @@ CodexRelay 是一个 macOS 菜单栏应用：Telegram 负责远程交互，本�
 - 一个 Telegram Bot Token。
 
 如果从源码运行或参与开发，还需要 Python 3.12 和 `uv`。
+
+当前版本只支持 Telegram 一对一私聊，不支持群组和频道。请通过 [@BotFather](https://t.me/BotFather) 创建机器人，并妥善保管 Bot Token。
 
 ## 从 GitHub Releases 安装
 
@@ -64,6 +76,10 @@ CodexRelay 是一个 macOS 菜单栏应用：Telegram 负责远程交互，本�
 
 也可以在 Finder 中右键点击应用并选择“打开”。不要关闭 macOS 的整体安全保护。如果系统提示“应用会损害你的电脑”或将应用移到废纸篓，请不要强行绕过，重新下载安装包并反馈提示内容。
 
+### App 启动后在哪里
+
+CodexRelay 是菜单栏应用。启动后通常不会像普通 App 一样在 Dock 中打开窗口，请点击 macOS 菜单栏中的 CodexRelay 图标打开概览面板，再选择“设置”完成配置。如果菜单栏空间不足，可以先在 macOS 控制中心查找，或暂时移除不常用的菜单栏图标。
+
 ## 快速开始
 
 ### 1. 源码运行
@@ -76,11 +92,12 @@ uv run codexrelay-gui
 
 ### 2. 完成首次配置
 
-1. 在 Telegram 的 BotFather 创建机器人并取得 Bot Token；
-2. 在 CodexRelay 的“Telegram”页面输入 Token；
-3. 在“项目”页面添加并选择允许 Codex 操作的目录；
-4. 生成一次性配对码；
-5. 在 Telegram 私聊机器人发送 `/pair 123456`。
+1. 在 Mac 上安装并登录 Codex CLI；
+2. 在 Telegram 中通过 [@BotFather](https://t.me/BotFather) 创建机器人并取得 Bot Token；
+3. 在 CodexRelay 的“Telegram”页面输入 Token；
+4. 在“项目”页面添加并选择允许 Codex 操作的目录；
+5. 生成一次性配对码；
+6. 在 Telegram 私聊机器人发送 `/pair 123456`。
 
 Token 只会写入 CodexRelay 私有数据文件，不会写入项目配置文件。
 
@@ -134,7 +151,7 @@ uv run mypy --strict src
 QT_QPA_PLATFORM=offscreen uv run pytest -q
 ```
 
-当前质量门：Ruff、Mypy strict 和 73 项 Pytest 通过。
+当前质量门：Ruff、Mypy strict 和完整 Pytest 测试套件；所有检查都会在 GitHub Actions 中运行。
 
 ## 构建 macOS App
 

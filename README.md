@@ -1,10 +1,20 @@
 # CodexRelay
 
+<p align="center">
+  <img src="assets/CodexRelay.svg" alt="CodexRelay" width="96">
+</p>
+
+<p align="center">
+  <a href="https://github.com/cwwcn/CodexRelay/actions/workflows/ci.yml"><img src="https://github.com/cwwcn/CodexRelay/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI status"></a>
+  <a href="https://github.com/cwwcn/CodexRelay/releases/latest"><img src="https://img.shields.io/github/v/release/cwwcn/CodexRelay?display_name=tag&sort=semver" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/cwwcn/CodexRelay" alt="MIT License"></a>
+</p>
+
 **Use Codex on your own Mac from Telegram.**
 
 CodexRelay is a macOS menu bar app that connects Telegram with a local Codex runtime. Your Mac executes the work in an explicitly authorized project directory, while Telegram provides the remote conversation, approvals, and status updates. Project sessions, context, model settings, and approval state stay on your Mac so you can return to a project without losing the thread.
 
-English | [简体中文](README.zh-CN.md) | [Wiki](../../wiki)
+English | [简体中文](README.zh-CN.md) | [Documentation](docs/)
 
 > **Current release:** `v0.1.0`
 >
@@ -36,7 +46,7 @@ Send a task to your Telegram bot and let your own Mac run Codex in a project you
 - Telegram cannot add arbitrary local directories;
 - Approval buttons are single-use, and both allow and deny decisions are reported explicitly;
 - CodexRelay never modifies your global `~/.codex/config.toml`;
-- GitHub Releases update checking is available; when automatic checks find a release, the menu-bar panel shows an “Update ready” action. After the user clicks it, CodexRelay selects the current Mac architecture's DMG, verifies its SHA-256 digest, and opens the installer for manual replacement.
+- GitHub Releases update checking is available; when automatic checks find a release, the menu-bar panel shows a “New version available” action. After the user clicks it, CodexRelay selects the current Mac architecture's DMG, verifies its SHA-256 digest, and opens the installer for manual replacement.
 
 ## Requirements
 
@@ -45,6 +55,8 @@ For the packaged DMG:
 - macOS on Apple Silicon or Intel;
 - Codex CLI installed and authenticated on the Mac;
 - A Telegram Bot Token.
+
+CodexRelay currently supports one-to-one Telegram chats only; group chats and channels are not supported. Create the bot through [@BotFather](https://t.me/BotFather), and keep the Bot Token private.
 
 For source development, Python 3.12 and `uv` are also required.
 
@@ -64,6 +76,10 @@ The current distribution is not Apple-notarized, so macOS may block the first la
 
 You can also right-click the app in Finder and choose **Open**. Do not disable Gatekeeper globally. If macOS says the app will damage your computer or moves it to the Trash, do not bypass the warning; download the package again and report the message.
 
+### Where the app appears
+
+CodexRelay is a menu bar app. It normally does not open a Dock window when launched. Click the CodexRelay icon in the macOS menu bar to open the overview panel, then choose **Settings** to complete setup. If the menu bar is crowded, look in the macOS Control Center or remove unused menu bar items temporarily.
+
 ## Quick start
 
 ### 1. Run from source
@@ -76,11 +92,12 @@ uv run codexrelay-gui
 
 ### 2. Complete first-time setup
 
-1. Create a bot with BotFather and copy its Bot Token;
-2. Enter the token on CodexRelay's **Telegram** page;
-3. Add and approve a project directory on the **Projects** page;
-4. Generate a one-time pairing code;
-5. Message your bot in Telegram with `/pair 123456`.
+1. Install and authenticate Codex CLI on the Mac;
+2. Create a bot with [@BotFather](https://t.me/BotFather) and copy its Bot Token;
+3. Enter the token on CodexRelay's **Telegram** page;
+4. Add and approve a project directory on the **Projects** page;
+5. Generate a one-time pairing code;
+6. Message your bot in a private Telegram chat with `/pair 123456`.
 
 The token is stored only in CodexRelay's private app-data file, never in a project configuration file.
 
@@ -134,7 +151,7 @@ uv run mypy --strict src
 QT_QPA_PLATFORM=offscreen uv run pytest -q
 ```
 
-The current quality gate includes Ruff, strict Mypy, and 73 passing Pytest tests.
+The current quality gate includes Ruff, strict Mypy, and the full Pytest suite; all checks run in GitHub Actions.
 
 ## Build the macOS app
 

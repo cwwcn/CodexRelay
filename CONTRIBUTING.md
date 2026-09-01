@@ -1,14 +1,16 @@
 # Contributing to CodexRelay
 
-感谢关注 CodexRelay。项目目前处于 Early Preview 阶段，欢迎通过 Issue 反馈问题、提出设计建议或提交代码改进。
+CodexRelay is a Public Alpha project. Issues, design feedback, documentation improvements, and focused pull requests are welcome. Please read the [security policy](SECURITY.md) before reporting a security concern.
 
-## 开始开发
+CodexRelay 目前是公开 Alpha 项目，欢迎通过 Issue 反馈问题、提出设计建议、改进文档或提交聚焦的 Pull Request。提交安全问题前，请先阅读[安全策略](SECURITY.md)。
+
+## Development setup / 开发环境
 
 ```bash
 uv sync --extra dev --extra gui
 ```
 
-## 提交前检查
+## Checks before submitting / 提交前检查
 
 ```bash
 uv run ruff check .
@@ -16,9 +18,17 @@ uv run mypy --strict src
 QT_QPA_PLATFORM=offscreen uv run pytest -q
 ```
 
-涉及 UI 的修改，请同时说明 macOS 版本、机器架构和复现步骤；涉及运行时或持久化的修改，请补充相应测试。
+For UI changes, include the macOS version, machine architecture, screenshots when useful, and reproduction steps. Runtime and persistence changes should include corresponding tests.
 
-## Pull Request 建议
+涉及 UI 的修改，请说明 macOS 版本、机器架构、必要时附截图和复现步骤；涉及运行时或持久化的修改，请补充相应测试。
+
+## Pull request guidelines / Pull Request 建议
+
+- Keep one pull request focused on one topic;
+- never commit tokens, logs, databases, `.app` bundles, or personal machine paths;
+- describe behavior changes, compatibility impact, and verification performed;
+- never modify a user's global `~/.codex/config.toml`;
+- discuss breaking changes in an Issue before implementing them.
 
 - 一个 PR 尽量只解决一个主题；
 - 不要提交 Token、日志、数据库、`.app` 或本机路径；
