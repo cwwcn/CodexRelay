@@ -1,0 +1,55 @@
+name: Build Apple Silicon Release Asset
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing GitHub Release tag to receive the Apple Silicon DMG"
+        required: true
+        default: "v0.1.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: latest
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --extra gui --extra packaging
+
+      - name: Build Apple Silicon app
+        env:
+          CODEXRELAY_TARGET_ARCH: arm64
+        run: |
+          build_root="$RUNNER_TEMP/codexrelay-build"
+          CODEXRELAY_DIST_DIR="$build_root/dist" CODEXRELAY_WORK_DIR="$build_root/work" ./scripts/build_app.sh
+          echo "CODEXRELAY_APP=$build_root/dist/CodexRelay.app" >> "$GITHUB_ENV"
+
+      - name: Create Apple Silicon DMG
+        env:
+          CODEXRELAY_ARCH: arm64
+          CODEXRELAY_RELEASE_DIR: ${{ runner.temp }}/release
+        run: ./scripts/create_dmg.sh "$CODEXRELAY_APP"
+
+      - name: Upload Apple Silicon DMG to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          gh release upload "$RELEASE_TAG" "$RUNNER_TEMP/release/CodexRelay-macos-arm64-v${version}.dmg" --clobber
