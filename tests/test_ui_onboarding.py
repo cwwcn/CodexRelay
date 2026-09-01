@@ -44,7 +44,7 @@ def test_missing_token_opens_telegram_settings() -> None:
     application = FakeTrayApplication()
 
     TrayApplication._runtime_failed(
-        application, "RuntimeError: Telegram Bot Token is not configured in macOS Keychain"
+        application, "RuntimeError: Telegram Bot Token is not configured in CodexRelay"
     )
 
     assert application.status_action.text == "CodexRelay · 需要处理"

@@ -45,7 +45,7 @@
 
 - GitHub Releases 可以按版本标签发布说明和二进制附件，适合作为公开发行入口。
 - Sparkle 2 使用 appcast 描述版本，并要求递增的 `CFBundleVersion`。正式更新应通过 HTTPS、Developer ID 签名、公证和 Sparkle EdDSA 签名保护。
-- Sparkle 推荐新应用使用 `SPUStandardUpdaterController`；自动检查、自动下载和稳定/测试通道可在后续接入。
+- Sparkle 推荐新应用使用 `SPUStandardUpdaterController`；在完成 Developer ID 签名、公证和密钥管理后，可作为后续的原地更新实现。
 - Apple 对 Mac App Store 之外的正式分发建议使用 Developer ID、Hardened Runtime 和公证；当前项目使用的 ad-hoc 签名只适合本机开发验证。
 
 来源：
@@ -145,7 +145,7 @@ Runtime 应发布不可变 `AppStatusSnapshot`，菜单弹层和设置窗口只�
 
 ## 5. 自动更新与发行
 
-当前版本已接入只读 GitHub Releases 检查，不自动下载或替换应用；正式安装更新仍需签名、公证和 Sparkle 发布链路。实现与规划如下：
+当前版本已接入 GitHub Releases 检查和用户确认后的 DMG 下载，不会后台替换正在运行的应用；下载完成后自动打开 DMG，最后拖入“应用程序”由用户完成。自动检查开关只负责定期检查和提示，不会代替用户点击下载。正式签名、公证和 Sparkle 发布链路可在后续增强。实现与规划如下：
 
 1. 版本号收敛为单一来源，并在构建时写入 Info.plist。
 2. 增加 `UpdateProvider`、`UpdateState` 和 release channel 数据模型；当前使用 GitHub Releases 元数据 provider。

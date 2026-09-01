@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import platform
 import sys
 from collections.abc import Callable, Coroutine
 from dataclasses import replace
@@ -53,9 +54,11 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QStackedWidget,
     QSystemTrayIcon,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
     QWidgetAction,
@@ -248,6 +251,150 @@ class RuntimeThread(QThread):
             LOGGER.info("current task interrupt requested; active=%s", future.result())
         except Exception as error:
             LOGGER.warning("current task interrupt failed: %s: %s", type(error).__name__, error)
+
+
+class UpdateDialog(QDialog):
+    """Deprecated: update actions now live directly in the About page."""
+
+    checkRequested = Signal()
+    downloadRequested = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("updateDialog")
+        self.setWindowTitle("GitHub Release 更新")
+        self.setModal(False)
+        self.setMinimumSize(620, 480)
+        self.resize(680, 520)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(12)
+
+        heading = QHBoxLayout()
+        title = QLabel("GitHub Release 更新")
+        title.setObjectName("updateDialogTitle")
+        heading.addWidget(title)
+        heading.addStretch(1)
+        self.current_version = QLabel(f"当前版本 {__version__}")
+        self.current_version.setObjectName("updateDialogCurrent")
+        heading.addWidget(self.current_version)
+        layout.addLayout(heading)
+
+        self.rows: dict[str, QLabel] = {}
+        for key, label in (
+            ("status", "状态"),
+            ("latest", "最新版本"),
+            ("resource", "资源"),
+            ("progress", "进度"),
+        ):
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            caption = QLabel(label)
+            caption.setObjectName("updateDialogLabel")
+            value = QLabel("—")
+            value.setObjectName("updateDialogValue")
+            value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            row.addWidget(caption)
+            row.addSpacing(28)
+            row.addWidget(value, 1)
+            layout.addLayout(row)
+            self.rows[key] = value
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setObjectName("updateProgress")
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.hide()
+        layout.addWidget(self.progress_bar)
+
+        notes_label = QLabel("版本说明")
+        notes_label.setObjectName("updateDialogLabel")
+        layout.addWidget(notes_label)
+        self.release_notes = QTextBrowser()
+        self.release_notes.setObjectName("updateNotes")
+        self.release_notes.setReadOnly(True)
+        self.release_notes.setOpenExternalLinks(False)
+        self.release_notes.setPlaceholderText("发行说明将在检查后显示")
+        layout.addWidget(self.release_notes, 1)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(10)
+        self.check_button = QPushButton("检查更新")
+        self.check_button.setObjectName("primaryButton")
+        self.check_button.clicked.connect(self.checkRequested)
+        self.download_button = QPushButton("下载并打开 DMG")
+        self.download_button.setObjectName("secondaryButton")
+        self.download_button.setEnabled(False)
+        self.download_button.clicked.connect(self.downloadRequested)
+        actions.addWidget(self.check_button)
+        actions.addWidget(self.download_button)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+
+    def refresh(self, state: UpdateState) -> None:
+        self.rows["status"].setText(state.message or "尚未检查")
+        self.rows["latest"].setText(
+            f"v{state.available_version}" if state.available_version else f"v{__version__}"
+        )
+        self.rows["resource"].setText(state.asset_name or "当前架构暂无安装包")
+        if state.downloaded_path:
+            self.rows["progress"].setText("下载完成 · 校验通过")
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(100)
+            self.progress_bar.show()
+        elif state.downloading:
+            if state.total_bytes:
+                percentage = min(100.0, state.downloaded_bytes / state.total_bytes * 100)
+                self.rows["progress"].setText(
+                    f"{percentage:.1f}% · {format_bytes(state.downloaded_bytes)} / "
+                    f"{format_bytes(state.total_bytes)}"
+                )
+                self.progress_bar.setRange(0, 1000)
+                self.progress_bar.setValue(round(percentage * 10))
+            else:
+                self.rows["progress"].setText(
+                    f"已下载 {format_bytes(state.downloaded_bytes)}"
+                )
+                self.progress_bar.setRange(0, 0)
+            self.progress_bar.show()
+        else:
+            self.rows["progress"].setText("尚未下载")
+            self.progress_bar.hide()
+        self.release_notes.setMarkdown(state.release_notes or "暂无发行说明。")
+        self.check_button.setEnabled(not state.checking and not state.downloading)
+        can_download = bool(state.available_version and state.asset_url)
+        self.download_button.setEnabled(
+            not state.checking
+            and not state.downloading
+            and (can_download or bool(state.downloaded_path))
+        )
+        self.download_button.setText("打开 DMG" if state.downloaded_path else "下载并打开 DMG")
+        download_is_primary = can_download or bool(state.downloaded_path)
+        self._set_button_role(
+            self.check_button,
+            "secondaryButton" if download_is_primary else "primaryButton",
+        )
+        self._set_button_role(
+            self.download_button,
+            "primaryButton" if download_is_primary else "secondaryButton",
+        )
+
+    @staticmethod
+    def _set_button_role(button: QPushButton, role: str) -> None:
+        if button.objectName() == role:
+            return
+        button.setObjectName(role)
+        button.style().unpolish(button)
+        button.style().polish(button)
+
+    def set_busy(self, busy: bool, *, downloading: bool = False) -> None:
+        self.check_button.setEnabled(not busy)
+        self.download_button.setEnabled(not busy)
+        if downloading:
+            self.progress_bar.setRange(0, 0)
+            self.progress_bar.show()
+            self.rows["progress"].setText("下载中…")
 
 
 class StatusNode(QWidget):
@@ -616,6 +763,8 @@ class MenuOverview(QWidget):
 class SettingsWindow(QMainWindow):
     runtime_configuration_changed = Signal()
     settings_closed = Signal()
+    update_available = Signal(str)
+    update_state_changed = Signal(object)
 
     def __init__(self, paths: AppPaths, pool: QThreadPool) -> None:
         super().__init__()
@@ -623,13 +772,17 @@ class SettingsWindow(QMainWindow):
         self.pool = pool
         self.settings_store = SettingsStore(paths.settings)
         self.settings = self.settings_store.load()
-        self.secret_store = SecretStore()
+        self.secret_store = SecretStore(paths.telegram_tokens)
         self.startup_service = StartupService()
         self.model_catalog: CodexModelCatalog | None = None
         self.model_project_id: str | None = None
         self._updating_model_controls = False
         self._workers: set[AsyncWorker] = set()
         self.update_provider: UpdateProvider | None = None
+        self.update_timer = QTimer(self)
+        self.update_timer.setInterval(6 * 60 * 60 * 1000)
+        self.update_timer.timeout.connect(lambda: self.check_for_updates(automatic=True))
+        self._notified_update_version: str | None = None
         self.setWindowTitle("CodexRelay")
         self.setMinimumSize(760, 700)
         self.resize(860, 780)
@@ -733,6 +886,8 @@ class SettingsWindow(QMainWindow):
     def set_update_provider(self, provider: UpdateProvider) -> None:
         self.update_provider = provider
         self._refresh_update_view()
+        if self.settings.app.update_checks_automatically:
+            self.update_timer.start()
 
     @staticmethod
     def _rail_connector() -> QLabel:
@@ -760,7 +915,7 @@ class SettingsWindow(QMainWindow):
         return page
 
     def _telegram_page(self) -> QWidget:
-        page, layout = self._page("Telegram", "Token保存在macOS钥匙串，不写入配置文件")
+        page, layout = self._page("Telegram", "Token仅保存在CodexRelay私有数据中")
         token_label = QLabel("Bot Token")
         token_label.setObjectName("fieldLabel")
         self.token_edit = QLineEdit()
@@ -959,8 +1114,8 @@ class SettingsWindow(QMainWindow):
         meta_layout.setContentsMargins(14, 7, 14, 7)
         meta_layout.setSpacing(18)
         for label, value in (
-            ("发行状态", "Early Preview"),
-            ("平台", "macOS · Apple Silicon"),
+            ("发行状态", "公开发行"),
+            ("平台", f"macOS · {platform.machine()}"),
             ("许可证", "MIT"),
         ):
             column = QVBoxLayout()
@@ -979,14 +1134,14 @@ class SettingsWindow(QMainWindow):
 
         update_card = QFrame()
         update_card.setObjectName("aboutCard")
-        update_card.setFixedHeight(150)
+        update_card.setFixedHeight(156)
         update_layout = QVBoxLayout(update_card)
         update_layout.setContentsMargins(14, 10, 14, 10)
         update_layout.setSpacing(5)
         update_heading = QLabel("更新")
         update_heading.setObjectName("aboutSectionTitle")
         update_layout.addWidget(update_heading)
-        update_hint = QLabel("从 GitHub Releases 获取正式版本")
+        update_hint = QLabel("GitHub Releases · 下载前会先校验安装包")
         update_hint.setObjectName("aboutMeta")
         update_layout.addWidget(update_hint)
 
@@ -1005,10 +1160,17 @@ class SettingsWindow(QMainWindow):
         check_row = QHBoxLayout()
         self.update_status = QLabel("尚未检查更新")
         self.update_status.setObjectName("aboutMeta")
-        self.check_updates_button = QPushButton("检查更新…")
-        self.check_updates_button.setObjectName("secondaryButton")
+        self.update_status.setWordWrap(True)
+        self.update_detail = QLabel()
+        self.update_detail.setObjectName("aboutMeta")
+        self.update_detail.setWordWrap(True)
+        self.update_detail.setMaximumHeight(34)
+        self.update_detail.setVisible(False)
+        update_layout.addWidget(self.update_detail)
+        self.check_updates_button = QPushButton("检查更新")
+        self.check_updates_button.setObjectName("primaryButton")
         self.check_updates_button.setFixedHeight(32)
-        self.check_updates_button.clicked.connect(self.check_for_updates)
+        self.check_updates_button.clicked.connect(self._trigger_update_action)
         check_row.addWidget(self.update_status, 1)
         check_row.addWidget(self.check_updates_button)
         update_layout.addLayout(check_row)
@@ -1016,7 +1178,7 @@ class SettingsWindow(QMainWindow):
 
         links_card = QFrame()
         links_card.setObjectName("aboutCard")
-        links_card.setFixedHeight(150)
+        links_card.setFixedHeight(178)
         links_layout = QVBoxLayout(links_card)
         links_layout.setContentsMargins(14, 10, 14, 10)
         links_layout.setSpacing(3)
@@ -1055,6 +1217,11 @@ class SettingsWindow(QMainWindow):
             projects=self.settings.projects,
         )
         self.settings_store.save(self.settings)
+        if self.settings.app.update_checks_automatically:
+            self.update_timer.start()
+            QTimer.singleShot(250, lambda: self.check_for_updates(automatic=True))
+        else:
+            self.update_timer.stop()
         self._refresh_update_view()
 
     def _refresh_update_view(self) -> None:
@@ -1066,10 +1233,89 @@ class SettingsWindow(QMainWindow):
             self.check_updates_button.setEnabled(False)
             return
         state = provider.state
-        self.update_status.setText(state.message or "尚未检查更新")
-        self.check_updates_button.setEnabled(not state.checking)
+        if state.available_version and state.asset_url:
+            status_text = f"发现新版本 v{state.available_version}"
+        elif state.available_version:
+            status_text = f"发现新版本 v{state.available_version}，当前架构暂无安装包"
+        elif state.message.startswith("当前已是最新版本"):
+            status_text = "已是最新"
+        else:
+            status_text = state.message or "尚未检查更新"
+        self.update_status.setText(status_text)
+        downloaded = bool(state.downloaded_path)
+        downloadable = bool(state.available_version and state.asset_url)
+        if state.checking:
+            self.check_updates_button.setText("检查中…")
+            self.check_updates_button.setEnabled(False)
+        elif state.downloading:
+            self.check_updates_button.setText("下载中…")
+            self.check_updates_button.setEnabled(False)
+        elif downloaded:
+            self.check_updates_button.setText("打开 DMG")
+            self.check_updates_button.setEnabled(True)
+            self._set_update_button_role("primaryButton")
+        elif downloadable:
+            self.check_updates_button.setText("下载更新")
+            self.check_updates_button.setEnabled(True)
+            self._set_update_button_role("primaryButton")
+        elif state.available_version is not None:
+            self.check_updates_button.setText("重新检查")
+            self.check_updates_button.setEnabled(True)
+            self._set_update_button_role("secondaryButton")
+        elif state.message.startswith("当前已是最新版本"):
+            self.check_updates_button.setText("已是最新")
+            self.check_updates_button.setEnabled(True)
+            self._set_update_button_role("secondaryButton")
+        else:
+            self.check_updates_button.setText("检查更新")
+            self.check_updates_button.setEnabled(True)
+            self._set_update_button_role("primaryButton")
 
-    def check_for_updates(self) -> None:
+        detail = ""
+        if state.available_version:
+            detail = f"最新版本 v{state.available_version}"
+            if state.asset_name:
+                asset_name = state.asset_name
+                if len(asset_name) > 54:
+                    asset_name = asset_name[:51] + "…"
+                detail += f" · {asset_name}"
+            if state.release_notes:
+                note = next(
+                    (
+                        line.strip(" -*#")
+                        for line in state.release_notes.splitlines()
+                        if line.strip()
+                    ),
+                    "",
+                )
+                if note:
+                    detail += f"\n发行说明：{note[:42]}"
+        elif state.downloaded_path:
+            detail = "更新包已下载并通过 SHA-256 校验"
+        self.update_detail.setText(detail)
+        self.update_detail.setVisible(bool(detail))
+        self.update_state_changed.emit(state)
+
+    def _trigger_update_action(self) -> None:
+        provider = self.update_provider
+        if provider is None:
+            return
+        state = provider.state
+        if state.downloaded_path:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(state.downloaded_path))
+        elif state.available_version and state.asset_url:
+            self.download_update(auto_open=True)
+        else:
+            self.check_for_updates(automatic=False)
+
+    def _set_update_button_role(self, role: str) -> None:
+        if self.check_updates_button.objectName() == role:
+            return
+        self.check_updates_button.setObjectName(role)
+        self.check_updates_button.style().unpolish(self.check_updates_button)
+        self.check_updates_button.style().polish(self.check_updates_button)
+
+    def check_for_updates(self, automatic: bool = False) -> None:
         provider = self.update_provider
         if provider is None:
             self._refresh_update_view()
@@ -1083,24 +1329,59 @@ class SettingsWindow(QMainWindow):
                 self.check_updates_button.setEnabled(True)
                 return
             state = value
-            self.update_status.setText(state.message)
-            self.check_updates_button.setEnabled(True)
-            release_url = getattr(state, "release_url", None)
-            if getattr(state, "available_version", None) and release_url:
-                box = QMessageBox(self)
-                box.setWindowTitle("发现新版本")
-                box.setText(f"CodexRelay {state.available_version} 已发布。")
-                box.setInformativeText("当前版本会打开官方 Releases 页面，由你确认下载和安装。")
-                open_button = box.addButton("打开 Releases", QMessageBox.ButtonRole.AcceptRole)
-                box.addButton("稍后再说", QMessageBox.ButtonRole.RejectRole)
-                box.exec()
-                if box.clickedButton() is open_button:
-                    QDesktopServices.openUrl(QUrl(str(release_url)))
+            self._refresh_update_view()
+            if state.available_version:
+                self.update_status.setText(
+                    f"发现新版本 v{state.available_version}"
+                    if state.asset_url
+                    else f"发现新版本 v{state.available_version}，当前架构暂无安装包"
+                )
+                if automatic and state.available_version != self._notified_update_version:
+                    self._notified_update_version = state.available_version
+                    self.update_available.emit(state.available_version)
 
         async def check() -> object:
             return provider.check_for_updates()
 
         self._run(check, finished=finished)
+
+    def download_update(self, auto_open: bool = False) -> None:
+        provider = self.update_provider
+        if provider is None:
+            self._refresh_update_view()
+            return
+        state = provider.state
+        if state.downloaded_path:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(state.downloaded_path))
+            return
+        self.check_updates_button.setText("下载中…")
+        self.check_updates_button.setEnabled(False)
+        self.update_status.setText("正在下载并校验更新包…")
+
+        def finished(value: object) -> None:
+            if not isinstance(value, UpdateState):
+                self.update_status.setText("更新下载返回了无效结果")
+                self._refresh_update_view()
+                return
+            self._refresh_update_view()
+            if value.downloaded_path:
+                if auto_open:
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(value.downloaded_path))
+                    return
+                box = QMessageBox(self)
+                box.setWindowTitle("更新包已准备好")
+                box.setText("更新包已下载并通过 SHA-256 校验。")
+                box.setInformativeText("打开 DMG 后，将 CodexRelay 拖入“应用程序”文件夹完成更新。")
+                open_button = box.addButton("打开 DMG", QMessageBox.ButtonRole.AcceptRole)
+                box.addButton("稍后再说", QMessageBox.ButtonRole.RejectRole)
+                box.exec()
+                if box.clickedButton() is open_button:
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(value.downloaded_path))
+
+        async def download() -> object:
+            return provider.download_update()
+
+        self._run(download, finished=finished)
 
     def _load_codex_status(self) -> None:
         environment = codex_subprocess_environment()
@@ -1301,7 +1582,7 @@ class SettingsWindow(QMainWindow):
 
         def finished(value: object) -> None:
             if isinstance(value, str) and value:
-                self.token_status.setText("Token已保存在钥匙串")
+                self.token_status.setText("Token已保存在CodexRelay私有数据中")
                 self.telegram_status.set_state("ready", "已配置")
             else:
                 self.token_status.setText("尚未配置Token")
@@ -1474,7 +1755,9 @@ class TrayApplication(QObject):
         self.paths = AppPaths.default()
         self.paths.ensure()
         self.pool = QThreadPool.globalInstance()
-        self.update_provider: UpdateProvider = GitHubReleaseUpdateProvider()
+        self.update_provider: UpdateProvider = GitHubReleaseUpdateProvider(
+            download_directory=self.paths.data_dir / "updates"
+        )
         self.window = SettingsWindow(self.paths, self.pool)
         self.runtime_thread: RuntimeThread | None = None
         self.restart_requested = False
@@ -1513,6 +1796,10 @@ class TrayApplication(QObject):
         tray_about_action = QAction("关于 CodexRelay", self.menu)
         tray_about_action.triggered.connect(self.show_about)
         self.menu.addAction(tray_about_action)
+        self.update_action = QAction("", self.menu)
+        self.update_action.setVisible(False)
+        self.update_action.triggered.connect(self._start_update_from_menu)
+        self.menu.addAction(self.update_action)
         self.menu.addSeparator()
         self.tray_quit_action = QAction("退出 CodexRelay", self.menu)
         self.tray_quit_action.triggered.connect(self.request_quit)
@@ -1529,6 +1816,9 @@ class TrayApplication(QObject):
         self.quit_action.setMenuRole(QAction.MenuRole.QuitRole)
         self.quit_action.setShortcut(QKeySequence(QKeySequence.StandardKey.Quit))
         self.quit_action.triggered.connect(self.request_quit)
+        self.window.update_available.connect(self._notify_update_available)
+        self.window.update_state_changed.connect(self._sync_update_action)
+        self.tray.messageClicked.connect(self.show_about)
         self.tray.setContextMenu(self.menu)
         self.window.install_application_menu(
             settings_action=settings_action,
@@ -1544,7 +1834,7 @@ class TrayApplication(QObject):
         self.status_timer.start()
         self.refresh_snapshot()
         if self.window.settings.app.update_checks_automatically:
-            QTimer.singleShot(1500, self.window.check_for_updates)
+            QTimer.singleShot(1500, lambda: self.window.check_for_updates(automatic=True))
         if self.window.settings.app.auto_connect:
             self.start_runtime()
 
@@ -1559,6 +1849,30 @@ class TrayApplication(QObject):
         if self.window.height() < 760:
             self.window.resize(max(self.window.width(), 860), 780)
         self.window.navigation.setCurrentRow(4)
+
+    def _notify_update_available(self, version: str) -> None:
+        self.update_action.setText("发现新版本，下载更新…")
+        self.update_action.setVisible(True)
+        self.tray.showMessage(
+            "CodexRelay 更新可用",
+            f"检测到新版本 v{version}。点击菜单栏提示下载更新。",
+            QSystemTrayIcon.MessageIcon.Information,
+            10000,
+        )
+
+    def _sync_update_action(self, value: object) -> None:
+        if not isinstance(value, UpdateState):
+            return
+        if value.available_version and value.asset_url:
+            verb = "打开 DMG" if value.downloaded_path else "下载更新"
+            self.update_action.setText(f"发现新版本，{verb}…")
+            self.update_action.setVisible(True)
+        else:
+            self.update_action.setVisible(False)
+
+    def _start_update_from_menu(self) -> None:
+        self.show_about()
+        self.window._trigger_update_action()
 
     def _activated(self, _reason: QSystemTrayIcon.ActivationReason) -> None:
         # On macOS, a tray context menu opens on the primary click. Keeping this
@@ -1929,6 +2243,15 @@ QLabel#aboutSectionTitle { color: #18202A; font-size: 16px; font-weight: 700; pa
 QFrame#aboutCard { background: #FFFFFF; border: 1px solid #DDE3E9; border-radius: 14px; }
 QLabel#aboutRowTitle { color: #273541; font-size: 13px; font-weight: 600; padding: 9px 0; }
 QFrame#aboutDivider { color: #E3E8ED; max-height: 1px; }
+QDialog#updateDialog { background: #F6F8FA; }
+QLabel#updateDialogTitle { color: #18202A; font-size: 21px; font-weight: 700; }
+QLabel#updateDialogCurrent { color: #778492; font-size: 12px; }
+QLabel#updateDialogLabel { color: #7A8793; font-size: 13px; min-width: 66px; }
+QLabel#updateDialogValue { color: #263746; font-size: 14px; font-weight: 650; }
+QTextBrowser#updateNotes { background: #FFFFFF; color: #263746; border: 1px solid #DDE3E9;
+    border-radius: 10px; padding: 10px; font-size: 13px; }
+QProgressBar#updateProgress { border: 0; border-radius: 3px; background: #DDE6ED; max-height: 6px; }
+QProgressBar#updateProgress::chunk { background: #2E8BCA; border-radius: 3px; }
 QPushButton#secondaryButton { background: #F3F6F8; color: #246AA5; border-color: #C9D8E3; }
 QPushButton#secondaryButton:hover { background: #EAF2F8; border-color: #9CB4C8; }
 QPushButton#linkButton { background: transparent; color: #246AA5; border: 0; border-radius: 7px;

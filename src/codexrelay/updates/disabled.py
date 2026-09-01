@@ -16,3 +16,6 @@ class DisabledUpdateProvider:
 
     def check_for_updates(self) -> UpdateState:
         return self._state
+
+    def download_update(self) -> UpdateState:
+        return self._state

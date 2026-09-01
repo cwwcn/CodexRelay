@@ -13,17 +13,27 @@ class UpdateState:
     release_url: str | None = None
     published_at: str | None = None
     release_notes: str | None = None
+    architecture: str | None = None
+    asset_name: str | None = None
+    asset_url: str | None = None
+    asset_digest: str | None = None
+    downloaded_path: str | None = None
+    downloading: bool = False
+    downloaded_bytes: int = 0
+    total_bytes: int | None = None
 
 
 class UpdateProvider(Protocol):
-    """Boundary for a future Sparkle-backed update provider.
+    """Update boundary independent of the eventual installation mechanism.
 
-    Development and ad-hoc builds use a disabled implementation. A signed public
-    build can later supply a Sparkle provider without coupling update behavior to
-    the settings window or runtime.
+    The current GitHub implementation supports user-confirmed DMG downloads for
+    unsigned releases. A signed build can later replace it with Sparkle without
+    coupling update behavior to the settings window or runtime.
     """
 
     @property
     def state(self) -> UpdateState: ...
 
     def check_for_updates(self) -> UpdateState: ...
+
+    def download_update(self) -> UpdateState: ...

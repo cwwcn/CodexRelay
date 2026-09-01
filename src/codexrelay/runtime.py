@@ -56,9 +56,11 @@ class CodexRelayRuntime:
             return self.identity
         self.paths.ensure()
         settings = SettingsStore(self.paths.settings).load()
-        token = await SecretStore().get_telegram_token(settings.telegram.account_id)
+        token = await SecretStore(self.paths.data_dir / "telegram-tokens.json").get_telegram_token(
+            settings.telegram.account_id
+        )
         if token is None:
-            raise RuntimeError("Telegram Bot Token is not configured in macOS Keychain")
+            raise RuntimeError("Telegram Bot Token is not configured in CodexRelay")
 
         database = Database(self.paths.database)
         await database.open()

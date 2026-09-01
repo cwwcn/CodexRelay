@@ -25,7 +25,7 @@ CodexRelay 是一个 macOS 菜单栏应用：Telegram 负责远程交互，本�
 - Codex thread/turn、Telegram inbox/outbox 和任务状态持久化；
 - 危险命令、文件修改和额外权限通过 Telegram 单次审批；
 - 菜单栏概览面板、设置窗口、任务停止和退出确认；
-- Telegram Bot Token 保存在 macOS Keychain；
+- Telegram Bot Token 保存在 CodexRelay 私有数据文件中，仅当前用户可读写；
 - 任务运行期间可阻止 Mac 自动睡眠；
 - 日志轮转、单实例运行和崩溃恢复保护。
 
@@ -36,7 +36,7 @@ CodexRelay 是一个 macOS 菜单栏应用：Telegram 负责远程交互，本�
 - Telegram 不能直接添加任意本机目录；
 - 审批按钮为单次消费，允许和拒绝都会明确反馈；
 - 不修改用户全局 `~/.codex/config.toml`；
-- 已提供 GitHub Releases 更新检查；只读取发行版元数据，不会自动替换应用。
+- 已提供 GitHub Releases 更新检查；自动检查发现新版本后，会在菜单栏面板显示“更新已就绪”。用户点击后，程序选择匹配当前 Mac 架构的 DMG，校验 SHA-256 后打开安装包，由用户完成最后的替换。
 
 ## 使用要求
 
@@ -82,7 +82,9 @@ uv run codexrelay-gui
 4. 生成一次性配对码；
 5. 在 Telegram 私聊机器人发送 `/pair 123456`。
 
-Token 只会写入 macOS 钥匙串，不会写入项目配置文件。
+Token 只会写入 CodexRelay 私有数据文件，不会写入项目配置文件。
+
+> 如果你从旧版开发构建升级：为了避免反复出现 macOS 钥匙串授权弹窗，新版本不会读取旧版钥匙串中的 Token。升级后请在“Telegram”页面重新输入一次 Bot Token。
 
 ## Telegram 命令
 
@@ -119,7 +121,7 @@ Token 只会写入 macOS 钥匙串，不会写入项目配置文件。
 | --- | --- |
 | 数据库和设置 | `~/Library/Application Support/CodexRelay/` |
 | 运行日志 | `~/Library/Logs/CodexRelay/` |
-| Telegram Bot Token | macOS Keychain |
+| Telegram Bot Token | CodexRelay 私有数据文件（`0600`） |
 
 日志按 2 MB 轮转并保留 3 份历史文件，最大约 8 MB。数据库保存项目、会话、任务、消息、审批和投递状态，不保存 Bot Token。
 
@@ -148,8 +150,8 @@ uv sync --extra gui --extra packaging
 - 当前全局只执行一个任务；
 - 当前 Telegram 是首个连接器，核心层已为未来其他连接器留出边界；
 - 当前同时支持 Apple Silicon 和 Intel，发布包按架构分别提供；
-- 当前更新流程会打开官方 GitHub Release 页面，由用户确认下载；正式签名和公证完成后再接入 Sparkle 安装；
-- 后续计划包括正式发行包、公证、自动更新和更多连接器。
+- 当前更新流程会在用户确认后下载并打开匹配架构的 GitHub Release DMG；由于尚未完成 Apple 公证，最后拖入“应用程序”的步骤仍由用户手动完成；
+- 后续计划包括签名与公证发行、可选的 Sparkle 原地更新，以及更多连接器。
 
 ## 文档
 

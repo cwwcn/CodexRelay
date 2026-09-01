@@ -25,7 +25,7 @@ Send a task to your Telegram bot and let your own Mac run Codex in a project you
 - Durable persistence for Codex threads/turns, Telegram inbox/outbox, and task state;
 - One-time Telegram approval for dangerous commands, file changes, and extra permissions;
 - Menu bar overview panel, settings window, task stop action, and quit confirmation;
-- Telegram Bot Token stored in the macOS Keychain;
+- Telegram Bot Token stored in CodexRelay's private app-data file with user-only permissions;
 - Optional sleep prevention while a task is running;
 - Rotating logs, single-instance protection, and crash-recovery safeguards.
 
@@ -36,7 +36,7 @@ Send a task to your Telegram bot and let your own Mac run Codex in a project you
 - Telegram cannot add arbitrary local directories;
 - Approval buttons are single-use, and both allow and deny decisions are reported explicitly;
 - CodexRelay never modifies your global `~/.codex/config.toml`;
-- A GitHub Releases update checker is available; it only reads release metadata and never replaces the app automatically.
+- GitHub Releases update checking is available; when automatic checks find a release, the menu-bar panel shows an “Update ready” action. After the user clicks it, CodexRelay selects the current Mac architecture's DMG, verifies its SHA-256 digest, and opens the installer for manual replacement.
 
 ## Requirements
 
@@ -82,7 +82,9 @@ uv run codexrelay-gui
 4. Generate a one-time pairing code;
 5. Message your bot in Telegram with `/pair 123456`.
 
-The token is stored only in the macOS Keychain, never in a project configuration file.
+The token is stored only in CodexRelay's private app-data file, never in a project configuration file.
+
+> Upgrading from an older development build: to avoid recurring macOS Keychain authorization prompts, current builds no longer read the legacy Keychain entry. Enter the Bot Token once again on the Telegram page after upgrading.
 
 ## Telegram commands
 
@@ -119,7 +121,7 @@ Settings are stored in CodexRelay's own SQLite database and apply only to the cu
 | --- | --- |
 | Database and settings | `~/Library/Application Support/CodexRelay/` |
 | Runtime logs | `~/Library/Logs/CodexRelay/` |
-| Telegram Bot Token | macOS Keychain |
+| Telegram Bot Token | CodexRelay private app-data file (`0600`) |
 
 Logs rotate at 2 MB and keep three historical files (about 8 MB maximum). The database stores projects, sessions, tasks, messages, approvals, and delivery state; it does not store the Bot Token.
 
@@ -148,8 +150,8 @@ The build script places intermediate files and the app bundle in `artifacts/` an
 - One task runs globally at a time;
 - Telegram is the first connector; the core layer leaves room for future connectors;
 - Apple Silicon and Intel are supported through architecture-specific DMG packages;
-- The current update flow opens the official GitHub Release page for user-confirmed downloads; Sparkle installation can be added after signed releases and notarization are in place;
-- Planned work includes signed distribution builds, notarization, automatic updates, and additional connectors.
+- The current update flow downloads and opens the matching GitHub Release DMG after user confirmation; the final drag-to-Applications step remains manual because the package is not yet Apple-notarized;
+- Planned work includes signed/notarized distribution, optional Sparkle-based in-place updates, and additional connectors.
 
 ## Documentation
 

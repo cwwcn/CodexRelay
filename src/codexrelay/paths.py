@@ -41,6 +41,10 @@ class AppPaths:
     def diagnostics(self) -> Path:
         return self.data_dir / "diagnostics"
 
+    @property
+    def telegram_tokens(self) -> Path:
+        return self.data_dir / "telegram-tokens.json"
+
     def ensure(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)

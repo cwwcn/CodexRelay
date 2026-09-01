@@ -42,7 +42,7 @@ Codex App Server
 - **上下文连续**：每个项目拥有独立的 Codex 会话。切换回项目后继续其原有 thread，不把不同项目的上下文混在一起。
 - **明确授权**：只有完成配对的 Telegram 用户、在 Mac 中登记的项目目录，以及经过审批的高风险操作才能生效。
 - **可观察**：菜单栏和 Telegram 都能反映连接、项目、任务、审批和错误状态。
-- **macOS 原生体验**：常驻菜单栏、设置窗口、Keychain、单实例、登录启动和退出确认均围绕 macOS 使用习惯设计。
+- **macOS 原生体验**：常驻菜单栏、设置窗口、私有凭据文件、单实例、登录启动和退出确认均围绕 macOS 使用习惯设计。
 - **可演进**：Connector、CodexBackend、更新提供器和启动服务均有独立边界，便于替换实现。
 
 ### 2.2 当前非目标
@@ -51,7 +51,7 @@ Codex App Server
 - 不在应用内重新实现 Codex，也不管理 Codex 登录凭据。
 - 当前不支持群聊、多用户协作和跨渠道会话同步。
 - 当前只实现 Telegram，不提供动态安装第三方连接器的插件市场。
-- 当前不通过应用自动下载并替换版本；更新检查只读取 GitHub Releases，并由用户确认下载。
+- 更新由 macOS 应用发起：检查 GitHub Releases，按当前 Mac 架构选择 DMG，校验 SHA-256 后打开安装包。应用不后台覆盖正在运行的自身，用户完成最后的拖入“应用程序”步骤。
 
 ## 3. 系统架构
 
@@ -100,7 +100,7 @@ Codex App Server
 | Telegram HTTP | `httpx` | Bot API 请求、长轮询和附件下载 |
 | 桌面 UI | PySide6 | 菜单栏、设置窗口、原生菜单和状态展示 |
 | 数据库 | SQLite + `aiosqlite` | 事件、任务、会话、审批、游标和迁移 |
-| 密钥存储 | `keyring` / macOS Keychain | Telegram Bot Token |
+| 密钥存储 | CodexRelay 私有数据文件（`0600`） | Telegram Bot Token |
 | Codex 接入 | `openai-codex` Python SDK | 本机 Codex App Server 适配 |
 | 打包 | PyInstaller | 独立 macOS `.app` |
 | 质量保障 | Ruff、Mypy、Pytest | lint、类型检查和自动化测试 |
@@ -112,7 +112,7 @@ Codex App Server
 应用启动后，`CodexRelayRuntime` 按以下顺序初始化：
 
 1. 创建应用数据、日志和诊断目录。
-2. 读取非敏感 TOML 配置，并从 macOS Keychain 读取 Telegram Bot Token。
+2. 读取非敏感 TOML 配置，并从 CodexRelay 私有数据文件读取 Telegram Bot Token。
 3. 打开 SQLite，执行迁移、过期审批清理、传输数据维护和中断任务修复。
 4. 定位本机 `codex` 可执行文件，启动 Codex Backend，并读取可用模型目录。
 5. 调用 Telegram `getMe` 验证 Bot Token，删除旧 webhook（保留待处理 Update）。
@@ -294,7 +294,7 @@ Codex 可能请求命令执行、文件变更或额外权限。`ApprovalCoordina
 └── codexrelay.log
 ```
 
-Telegram Bot Token 不进入 TOML、SQLite、环境变量、命令行参数或日志，而是通过 `keyring` 保存到 macOS Keychain。
+Telegram Bot Token 不进入 TOML、SQLite、环境变量、命令行参数或日志，而是保存到应用数据目录下权限为 `0600` 的私有凭据文件。这样可以避免 ad-hoc 开发构建触发反复的 macOS 钥匙串授权弹窗。凭据文件不进入 Git，也不会被 CodexRelay 上传。为避免升级旧版本时再次触发系统授权，新版本不自动读取旧钥匙串记录；旧版本用户升级后需在 Telegram 设置页重新输入一次 Token。
 
 ### 10.2 数据模型
 
@@ -396,15 +396,15 @@ CodexRelay 只保存自己的项目、会话和模型设置，不读取后回写
 
 ### 13.1 当前更新机制
 
-更新提供器从 GitHub Releases API 读取最新正式发行版，忽略草稿和预发布版本，比较应用版本号并展示发行说明、发布时间和官方 Releases 地址。当前流程是“检查 → 提示 → 用户打开官方页面下载”，不会静默替换应用。
+更新提供器从 GitHub Releases API 读取最新正式发行版，忽略草稿和预发布版本，比较应用版本号并展示发行说明、发布时间、匹配当前架构的 DMG 资源和校验信息。开启自动检查后，发现更新会在菜单栏面板显示“更新已就绪”；用户点击后进入“下载 → SHA-256 校验 → 自动打开 DMG → 手动拖入‘应用程序’”流程，不会后台覆盖正在运行的应用。
 
-更新逻辑通过 `UpdateProvider` 接口隔离。未来完成签名、公证和发行渠道建设后，可以接入 Sparkle 或其他安装器，而不需要重写 About 页面和设置持久化。
+更新逻辑通过 `UpdateProvider` 接口隔离。当前 GitHub provider 负责正式 Release 发现、架构匹配、DMG 下载和 SHA-256 校验；未来完成 Developer ID 签名、公证和 Sparkle 发行链路后，可以替换安装器实现，而不需要重写 About 页面和设置持久化。
 
 ### 13.2 本地构建
 
 项目使用 `uv` 管理依赖，Ruff 和 strict Mypy 负责静态质量，Pytest 负责单元与集成测试。macOS 应用使用 PyInstaller `onedir + windowed` 构建，Codex CLI 不打包进应用，启动时仍使用用户本机已安装的 CLI。
 
-面向公开分发时，还需要 Apple Developer ID 签名、公证、票据 stapling、干净用户环境验证以及 GitHub Release 资产发布。当前主要验证 Apple Silicon 架构。
+面向公开分发时，若希望消除 Gatekeeper 的首次拦截，还需要 Apple Developer ID 签名、公证、票据 stapling 和干净用户环境验证。当前 Release 流程分别构建并验证 Apple Silicon 与 Intel DMG；在未公证阶段，用户按项目文档通过“隐私与安全性 → 仍要打开”完成首次授权。
 
 ## 14. 测试与质量保障
 
@@ -417,7 +417,7 @@ CodexRelay 只保存自己的项目、会话和模型设置，不读取后回写
 - 命令/文件/权限审批、nonce 重放和审批结果反馈；
 - Inbox、Outbox、Job 状态转换、迁移和重启恢复；
 - 图片下载、大小限制和临时文件清理；
-- Keychain、单实例、登录启动和 Qt 菜单栏行为；
+- 私有凭据文件、单实例、登录启动和 Qt 菜单栏行为；
 - GitHub Releases 版本比较和网络错误。
 
 核心流程使用假连接器和可控的后端替身测试，确保业务逻辑不依赖 Telegram 原始类型。真实 Telegram 验收则用于验证 Bot API、配对、项目切换、审批和消息投递的端到端行为。
@@ -430,7 +430,7 @@ CodexRelay 只保存自己的项目、会话和模型设置，不读取后回写
 - 主要支持 Apple Silicon macOS；其他架构和发行方式需要独立构建验证。
 - 外部 Telegram 消息无法做到绝对 exactly-once，但 Codex 任务不会因普通重试而自动重复执行。
 - 会话连续性受 Codex 自身上下文窗口、thread 可用性和本地磁盘可靠性约束。
-- 更新检查已经预留正式安装器边界，但当前仍需用户打开 Releases 页面完成下载和安装。
+- 更新检查、架构匹配、DMG 下载和校验已经完成；当前仍需用户把打开的 App 拖入“应用程序”完成安装。
 
 ## 16. 扩展方向
 
@@ -439,7 +439,7 @@ CodexRelay 只保存自己的项目、会话和模型设置，不读取后回写
 1. 更多连接器，例如企业微信、钉钉和飞书。
 2. 更细粒度的用户、项目和审批权限。
 3. 多任务队列或按项目并行执行（需要重新设计资源锁与风险模型）。
-4. 签名发行包、公证和 Sparkle 自动更新。
+4. 签名发行包、公证和可选的 Sparkle 原地更新。
 5. 可导出、可恢复的会话归档与更完善的诊断报告。
 6. 对 Codex App Server 协议版本的能力协商和兼容矩阵。
 
