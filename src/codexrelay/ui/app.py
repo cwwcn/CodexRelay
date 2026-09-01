@@ -483,8 +483,8 @@ class SettingsWindow(QMainWindow):
         self._workers: set[AsyncWorker] = set()
         self.update_provider: UpdateProvider | None = None
         self.setWindowTitle("CodexRelay")
-        self.setMinimumSize(760, 620)
-        self.resize(800, 660)
+        self.setMinimumSize(760, 700)
+        self.resize(860, 780)
         self.setUnifiedTitleAndToolBarOnMac(True)
         self._build()
         self._load_codex_status()
@@ -791,7 +791,6 @@ class SettingsWindow(QMainWindow):
         layout = QVBoxLayout(content)
         layout.setContentsMargins(0, 0, 8, 0)
         layout.setSpacing(14)
-        content.setMinimumHeight(700)
         scroll.setWidget(content)
         page_layout.addWidget(scroll, 1)
 
@@ -1447,6 +1446,8 @@ class TrayApplication(QObject):
 
     def show_about(self) -> None:
         self.show_window()
+        if self.window.height() < 760:
+            self.window.resize(max(self.window.width(), 860), 780)
         self.window.navigation.setCurrentRow(4)
 
     def _activated(self, _reason: QSystemTrayIcon.ActivationReason) -> None:
