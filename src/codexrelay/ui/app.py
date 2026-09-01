@@ -49,6 +49,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QStackedWidget,
     QSystemTrayIcon,
     QVBoxLayout,
@@ -300,6 +301,33 @@ class TaskStatusDot(QWidget):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(self._COLORS.get(self._state, self._COLORS["idle"]))
         painter.drawEllipse(self.rect().adjusted(1, 1, -1, -1))
+
+
+class AboutMark(QWidget):
+    """Compact colored brand mark for the About page."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setFixedSize(72, 72)
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#246AA5"))
+        painter.drawRoundedRect(self.rect(), 18, 18)
+        pen = QPen(QColor("#FFFFFF"), 6)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawArc(QRectF(18, 14, 36, 34), 32 * 16, 292 * 16)
+        painter.drawLine(QLineF(17, 48, 55, 48))
+        painter.drawLine(QLineF(36, 48, 36, 59))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#8FE0BD"))
+        painter.drawEllipse(QRectF(47, 16, 10, 10))
 
 
 class MenuOverview(QWidget):
@@ -753,16 +781,27 @@ class SettingsWindow(QMainWindow):
         return page
 
     def _about_page(self) -> QWidget:
-        page, layout = self._page("关于", "CodexRelay 的版本、发行信息与更新")
+        page, page_layout = self._page("关于", "CodexRelay 的版本、发行信息与更新")
+        scroll = QScrollArea()
+        scroll.setObjectName("aboutScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(0, 0, 8, 0)
+        layout.setSpacing(14)
+        content.setMinimumHeight(700)
+        scroll.setWidget(content)
+        page_layout.addWidget(scroll, 1)
 
         hero = QFrame()
         hero.setObjectName("aboutHero")
+        hero.setMinimumHeight(118)
         hero_layout = QHBoxLayout(hero)
         hero_layout.setContentsMargins(20, 18, 20, 18)
         hero_layout.setSpacing(16)
-        logo = QLabel()
-        logo.setPixmap(make_icon().pixmap(QSize(64, 64)))
-        logo.setFixedSize(64, 64)
+        logo = AboutMark()
         hero_layout.addWidget(logo, alignment=Qt.AlignmentFlag.AlignTop)
         identity = QVBoxLayout()
         identity.setSpacing(3)
@@ -784,6 +823,7 @@ class SettingsWindow(QMainWindow):
 
         meta_card = QFrame()
         meta_card.setObjectName("aboutCard")
+        meta_card.setMinimumHeight(76)
         meta_layout = QHBoxLayout(meta_card)
         meta_layout.setContentsMargins(16, 10, 16, 10)
         meta_layout.setSpacing(20)
@@ -808,6 +848,7 @@ class SettingsWindow(QMainWindow):
         layout.addWidget(update_title)
         update_card = QFrame()
         update_card.setObjectName("aboutCard")
+        update_card.setMinimumHeight(152)
         update_layout = QVBoxLayout(update_card)
         update_layout.setContentsMargins(16, 12, 16, 12)
         update_layout.setSpacing(0)
@@ -860,6 +901,7 @@ class SettingsWindow(QMainWindow):
         layout.addWidget(links_title)
         links_card = QFrame()
         links_card.setObjectName("aboutCard")
+        links_card.setMinimumHeight(142)
         links_layout = QVBoxLayout(links_card)
         links_layout.setContentsMargins(16, 6, 16, 6)
         for label, url in (
@@ -1752,6 +1794,8 @@ QLabel#aboutMetaLabel { color: #82909B; font-size: 10px; font-weight: 650; }
 QLabel#aboutMetaValue { color: #2A3945; font-size: 12px; font-weight: 650; }
 QLabel#aboutSectionTitle { color: #18202A; font-size: 16px; font-weight: 700; padding-top: 7px; }
 QFrame#aboutCard { background: #FFFFFF; border: 1px solid #DDE3E9; border-radius: 14px; }
+QScrollArea#aboutScroll { background: transparent; border: 0; }
+QScrollArea#aboutScroll > QWidget > QWidget { background: transparent; }
 QLabel#aboutRowTitle { color: #273541; font-size: 13px; font-weight: 600; padding: 9px 0; }
 QFrame#aboutDivider { color: #E3E8ED; max-height: 1px; }
 QPushButton#secondaryButton { background: #F3F6F8; color: #246AA5; border-color: #C9D8E3; }
