@@ -781,48 +781,48 @@ class SettingsWindow(QMainWindow):
 
     def _about_page(self) -> QWidget:
         page, layout = self._page("关于", "CodexRelay 的版本、发行信息与更新")
-        layout.setSpacing(10)
+        layout.setSpacing(12)
 
         hero = QFrame()
         hero.setObjectName("aboutHero")
-        hero.setMinimumHeight(98)
+        hero.setFixedHeight(112)
         hero_layout = QHBoxLayout(hero)
-        hero_layout.setContentsMargins(16, 12, 16, 12)
-        hero_layout.setSpacing(16)
-        logo = AboutMark()
-        logo.setFixedSize(60, 60)
-        hero_layout.addWidget(logo, alignment=Qt.AlignmentFlag.AlignTop)
+        hero_layout.setContentsMargins(18, 14, 18, 14)
+        hero_layout.setSpacing(14)
+        hero_layout.addWidget(AboutMark(), alignment=Qt.AlignmentFlag.AlignVCenter)
         identity = QVBoxLayout()
-        identity.setSpacing(3)
+        identity.setSpacing(2)
         app_name = QLabel("CodexRelay")
         app_name.setObjectName("aboutAppName")
         tagline = QLabel("Telegram 与本机 Codex 之间的本地安全中继")
         tagline.setObjectName("aboutTagline")
-        version = QLabel(f"版本 {__version__}")
-        version.setObjectName("aboutVersion")
-        build = QLabel(f"构建时间：{__build_time__}")
-        build.setObjectName("aboutMeta")
         identity.addWidget(app_name)
         identity.addWidget(tagline)
-        identity.addSpacing(5)
-        identity.addWidget(version)
-        identity.addWidget(build)
         hero_layout.addLayout(identity, 1)
+        build_info = QVBoxLayout()
+        build_info.setSpacing(2)
+        version = QLabel(f"版本 {__version__}")
+        version.setObjectName("aboutVersion")
+        build = QLabel(f"构建于 {__build_time__}")
+        build.setObjectName("aboutMeta")
+        build_info.addWidget(version, alignment=Qt.AlignmentFlag.AlignRight)
+        build_info.addWidget(build, alignment=Qt.AlignmentFlag.AlignRight)
+        hero_layout.addLayout(build_info)
         layout.addWidget(hero)
 
         meta_card = QFrame()
         meta_card.setObjectName("aboutCard")
-        meta_card.setMinimumHeight(76)
+        meta_card.setFixedHeight(64)
         meta_layout = QHBoxLayout(meta_card)
-        meta_layout.setContentsMargins(16, 10, 16, 10)
-        meta_layout.setSpacing(20)
+        meta_layout.setContentsMargins(14, 7, 14, 7)
+        meta_layout.setSpacing(18)
         for label, value in (
             ("发行状态", "Early Preview"),
             ("平台", "macOS · Apple Silicon"),
             ("许可证", "MIT"),
         ):
             column = QVBoxLayout()
-            column.setSpacing(2)
+            column.setSpacing(1)
             caption = QLabel(label)
             caption.setObjectName("aboutMetaLabel")
             detail = QLabel(value)
@@ -832,15 +832,18 @@ class SettingsWindow(QMainWindow):
             meta_layout.addLayout(column, 1)
         layout.addWidget(meta_card)
 
-        update_title = QLabel("更新")
-        update_title.setObjectName("aboutSectionTitle")
-        layout.addWidget(update_title)
+        panels = QHBoxLayout()
+        panels.setSpacing(12)
+
         update_card = QFrame()
         update_card.setObjectName("aboutCard")
-        update_card.setMinimumHeight(152)
+        update_card.setFixedHeight(170)
         update_layout = QVBoxLayout(update_card)
-        update_layout.setContentsMargins(16, 12, 16, 12)
-        update_layout.setSpacing(0)
+        update_layout.setContentsMargins(14, 10, 14, 10)
+        update_layout.setSpacing(5)
+        update_heading = QLabel("更新")
+        update_heading.setObjectName("aboutSectionTitle")
+        update_layout.addWidget(update_heading)
 
         auto_row = QHBoxLayout()
         auto_label = QLabel("自动检查更新")
@@ -857,7 +860,8 @@ class SettingsWindow(QMainWindow):
         channel_label = QLabel("更新频道")
         channel_label.setObjectName("aboutRowTitle")
         self.update_channel_combo = ChoiceButton()
-        self.update_channel_combo.setFixedWidth(150)
+        self.update_channel_combo.setFixedWidth(132)
+        self.update_channel_combo.setFixedHeight(34)
         self.update_channel_combo.addItem("稳定版", UpdateChannel.STABLE.value)
         self.update_channel_combo.addItem("测试版", UpdateChannel.BETA.value)
         self.update_channel_combo.setCurrentIndex(
@@ -869,30 +873,27 @@ class SettingsWindow(QMainWindow):
         channel_row.addWidget(self.update_channel_combo)
         update_layout.addLayout(channel_row)
 
-        divider = QFrame()
-        divider.setObjectName("aboutDivider")
-        divider.setFrameShape(QFrame.Shape.HLine)
-        update_layout.addWidget(divider)
-
         check_row = QHBoxLayout()
         self.update_status = QLabel("尚未检查更新")
         self.update_status.setObjectName("aboutMeta")
         self.check_updates_button = QPushButton("检查更新…")
         self.check_updates_button.setObjectName("secondaryButton")
+        self.check_updates_button.setFixedHeight(32)
         self.check_updates_button.clicked.connect(self.check_for_updates)
         check_row.addWidget(self.update_status, 1)
         check_row.addWidget(self.check_updates_button)
         update_layout.addLayout(check_row)
-        layout.addWidget(update_card)
+        panels.addWidget(update_card, 1)
 
-        links_title = QLabel("链接")
-        links_title.setObjectName("aboutSectionTitle")
-        layout.addWidget(links_title)
         links_card = QFrame()
         links_card.setObjectName("aboutCard")
-        links_card.setMinimumHeight(142)
+        links_card.setFixedHeight(170)
         links_layout = QVBoxLayout(links_card)
-        links_layout.setContentsMargins(16, 6, 16, 6)
+        links_layout.setContentsMargins(14, 10, 14, 10)
+        links_layout.setSpacing(3)
+        links_heading = QLabel("资源")
+        links_heading.setObjectName("aboutSectionTitle")
+        links_layout.addWidget(links_heading)
         for label, url in (
             ("GitHub 仓库", "https://github.com/cwwcn/CodexRelay"),
             ("GitHub Releases", "https://github.com/cwwcn/CodexRelay/releases"),
@@ -905,12 +906,9 @@ class SettingsWindow(QMainWindow):
                 lambda _checked=False, target=url: QDesktopServices.openUrl(QUrl(target))
             )
             links_layout.addWidget(link)
-        layout.addWidget(links_card)
+        panels.addWidget(links_card, 1)
+        layout.addLayout(panels)
 
-        footer = QLabel("CodexRelay 保持本地优先：更新检查只读取官方 GitHub Releases 元数据。")
-        footer.setObjectName("hint")
-        footer.setWordWrap(True)
-        layout.addWidget(footer)
         layout.addStretch(1)
         return page
 
@@ -1785,8 +1783,6 @@ QLabel#aboutMetaLabel { color: #82909B; font-size: 10px; font-weight: 650; }
 QLabel#aboutMetaValue { color: #2A3945; font-size: 12px; font-weight: 650; }
 QLabel#aboutSectionTitle { color: #18202A; font-size: 16px; font-weight: 700; padding-top: 7px; }
 QFrame#aboutCard { background: #FFFFFF; border: 1px solid #DDE3E9; border-radius: 14px; }
-QScrollArea#aboutScroll { background: transparent; border: 0; }
-QScrollArea#aboutScroll > QWidget > QWidget { background: transparent; }
 QLabel#aboutRowTitle { color: #273541; font-size: 13px; font-weight: 600; padding: 9px 0; }
 QFrame#aboutDivider { color: #E3E8ED; max-height: 1px; }
 QPushButton#secondaryButton { background: #F3F6F8; color: #246AA5; border-color: #C9D8E3; }
