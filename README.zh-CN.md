@@ -6,9 +6,9 @@ CodexRelay 是一个 macOS 菜单栏应用：Telegram 负责远程交互，本�
 
 [English](README.md) | 简体中文 | [Wiki](../../wiki)
 
-> 当前状态：Early Preview / Alpha
+> **当前版本：** `v0.1.0`
 >
-> 目前主要面向个人使用和 Apple Silicon Mac。界面、打包、公证和在线更新仍在持续完善。
+> 当前版本面向 Apple Silicon Mac。发布包使用 ad-hoc 签名，尚未完成 Apple 公证；下方提供首次打开时 macOS 安全确认的操作说明。
 
 ## 它解决什么问题
 
@@ -40,11 +40,29 @@ CodexRelay 是一个 macOS 菜单栏应用：Telegram 负责远程交互，本�
 
 ## 使用要求
 
+使用打包 DMG 需要：
+
 - macOS Apple Silicon；
-- Python 3.12；
 - 已安装并登录本机 Codex CLI；
-- 一个 Telegram Bot Token；
-- `uv`（源码运行和开发构建时需要）。
+- 一个 Telegram Bot Token。
+
+如果从源码运行或参与开发，还需要 Python 3.12 和 `uv`。
+
+## 从 GitHub Releases 安装
+
+从 [GitHub Releases](https://github.com/cwwcn/CodexRelay/releases) 下载最新的 `CodexRelay-macos-arm64-<版本>.dmg`，打开后将 CodexRelay 拖入“应用程序”文件夹。
+
+### macOS 首次打开
+
+当前发布包尚未完成 Apple 公证，macOS 首次打开时可能会拦截：
+
+1. 双击打开 CodexRelay，看到安全提示后点击“取消”；
+2. 打开“系统设置 → 隐私与安全性”；
+3. 向下找到关于 CodexRelay 的安全提示；
+4. 点击“仍要打开”，再确认一次；
+5. 重新打开 CodexRelay。
+
+也可以在 Finder 中右键点击应用并选择“打开”。不要关闭 macOS 的整体安全保护。如果系统提示“应用会损害你的电脑”或将应用移到废纸篓，请不要强行绕过，重新下载安装包并反馈提示内容。
 
 ## 快速开始
 
@@ -114,7 +132,7 @@ uv run mypy --strict src
 QT_QPA_PLATFORM=offscreen uv run pytest -q
 ```
 
-当前质量门：Ruff、Mypy strict 和 65 项 Pytest 通过。
+当前质量门：Ruff、Mypy strict 和 73 项 Pytest 通过。
 
 ## 构建 macOS App
 

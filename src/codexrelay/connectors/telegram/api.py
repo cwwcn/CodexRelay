@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +64,22 @@ class TelegramClient:
 
     async def delete_webhook(self) -> None:
         await self._call("deleteWebhook", {"drop_pending_updates": False})
+
+    async def set_my_commands(
+        self,
+        commands: Sequence[Mapping[str, str]],
+        *,
+        scope: Mapping[str, str] | None = None,
+    ) -> None:
+        """Publish Telegram's native slash-command suggestions for a scope."""
+        payload: dict[str, Any] = {"commands": [dict(command) for command in commands]}
+        if scope is not None:
+            payload["scope"] = dict(scope)
+        result = await self._call("setMyCommands", payload)
+        if result is not True:
+            raise TelegramAPIError(
+                "setMyCommands returned an invalid result", error_code=None, retry_after=None
+            )
 
     async def get_updates(
         self,

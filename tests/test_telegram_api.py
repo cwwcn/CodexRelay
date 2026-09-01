@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import httpx
@@ -8,6 +9,11 @@ from codexrelay.connectors.telegram.api import (
     TelegramClient,
     parse_incoming_message,
     split_text,
+)
+from codexrelay.connectors.telegram.commands import (
+    TELEGRAM_PRIVATE_COMMAND_SCOPE,
+    bot_api_commands,
+    help_text,
 )
 
 
@@ -101,6 +107,47 @@ async def test_client_handles_retry_after_without_exposing_token() -> None:
 
     assert raised.value.retry_after == 3
     assert "secret-token" not in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_set_my_commands_publishes_private_chat_menu() -> None:
+    requests: list[dict[str, object]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert isinstance(body, dict)
+        requests.append(body)
+        return httpx.Response(200, request=request, json={"ok": True, "result": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = TelegramClient("123:secret-token", client=http_client)
+        await client.set_my_commands(bot_api_commands(), scope=TELEGRAM_PRIVATE_COMMAND_SCOPE)
+
+    assert requests == [
+        {
+            "commands": list(bot_api_commands()),
+            "scope": dict(TELEGRAM_PRIVATE_COMMAND_SCOPE),
+        }
+    ]
+
+
+def test_telegram_command_registry_drives_help_text() -> None:
+    commands = bot_api_commands()
+
+    assert [item["command"] for item in commands] == [
+        "start",
+        "help",
+        "pair",
+        "projects",
+        "use",
+        "new",
+        "models",
+        "model",
+        "reasoning",
+        "status",
+        "stop",
+    ]
+    assert "/use 切换当前项目：/use <编号或名称>" in help_text()
 
 
 @pytest.mark.asyncio

@@ -6,9 +6,9 @@ CodexRelay is a macOS menu bar app that connects Telegram with a local Codex run
 
 English | [简体中文](README.zh-CN.md) | [Wiki](../../wiki)
 
-> **Status:** Early Preview / Alpha
+> **Current release:** `v0.1.0`
 >
-> Currently focused on personal use and Apple Silicon Macs. The UI, packaging, notarization, and update delivery flow are still being refined.
+> This release targets Apple Silicon Macs. The distributed app is ad-hoc signed and is not yet Apple-notarized; the first-launch instructions below explain the one-time macOS security confirmation.
 
 ## Why CodexRelay
 
@@ -40,11 +40,29 @@ Send a task to your Telegram bot and let your own Mac run Codex in a project you
 
 ## Requirements
 
+For the packaged DMG:
+
 - macOS on Apple Silicon;
-- Python 3.12;
 - Codex CLI installed and authenticated on the Mac;
-- A Telegram Bot Token;
-- `uv` for source development and packaging.
+- A Telegram Bot Token.
+
+For source development, Python 3.12 and `uv` are also required.
+
+## Install from GitHub Releases
+
+Download the latest `CodexRelay-macos-arm64-<version>.dmg` from [GitHub Releases](https://github.com/cwwcn/CodexRelay/releases), open it, and drag CodexRelay to Applications.
+
+### First launch on macOS
+
+The current distribution is not Apple-notarized, so macOS may block the first launch:
+
+1. Double-click CodexRelay and dismiss the security alert;
+2. Open **System Settings → Privacy & Security**;
+3. Scroll to the security message for CodexRelay;
+4. Click **Open Anyway**, then confirm;
+5. Launch CodexRelay again.
+
+You can also right-click the app in Finder and choose **Open**. Do not disable Gatekeeper globally. If macOS says the app will damage your computer or moves it to the Trash, do not bypass the warning; download the package again and report the message.
 
 ## Quick start
 
@@ -114,7 +132,7 @@ uv run mypy --strict src
 QT_QPA_PLATFORM=offscreen uv run pytest -q
 ```
 
-The current quality gate includes Ruff, strict Mypy, and 65 passing Pytest tests.
+The current quality gate includes Ruff, strict Mypy, and 73 passing Pytest tests.
 
 ## Build the macOS app
 

@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 
 from codexrelay.approval import ApprovalCoordinator
 from codexrelay.codex.app_server import AppServerBackend
 from codexrelay.codex.model_catalog import CodexModelCatalog
-from codexrelay.connectors.telegram.api import TelegramClient
+from codexrelay.connectors.telegram.api import TelegramClient, TelegramError
+from codexrelay.connectors.telegram.commands import (
+    TELEGRAM_PRIVATE_COMMAND_SCOPE,
+    bot_api_commands,
+)
 from codexrelay.connectors.telegram.outbox import TelegramOutbox
 from codexrelay.connectors.telegram.poller import TelegramPoller
 from codexrelay.connectors.telegram.router import TelegramRouter
@@ -18,6 +23,8 @@ from codexrelay.projects import ProjectService
 from codexrelay.secrets import SecretStore
 from codexrelay.settings import Settings, SettingsStore
 from codexrelay.sleep import SleepInhibitor
+
+LOGGER = logging.getLogger("codexrelay.runtime")
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +77,15 @@ class CodexRelayRuntime:
             await backend.start()
             model_catalog = await backend.model_catalog()
             bot = await telegram.get_me()
+            try:
+                await telegram.set_my_commands(
+                    bot_api_commands(),
+                    scope=TELEGRAM_PRIVATE_COMMAND_SCOPE,
+                )
+            except TelegramError as error:
+                # Native command suggestions are useful, but their absence must
+                # not prevent an otherwise valid relay from starting.
+                LOGGER.warning("could not register Telegram command menu: %s", error)
             await telegram.delete_webhook()
         except BaseException:
             await telegram.close()

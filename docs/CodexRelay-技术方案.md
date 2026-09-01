@@ -195,6 +195,8 @@ Telegram 文本超过单条消息限制时由 API 层分段发送。分段器优
 
 命令解析在 Telegram Router 中完成，但真正的项目切换、会话创建和任务状态修改仍通过 Core/Database 服务执行。
 
+应用连接 Telegram 时还会通过 `setMyCommands` 注册这组命令的中文说明，并限定在私聊范围内。这样用户在 Telegram 输入 `/` 时可以看到原生命令提示；命令菜单属于 Telegram Connector 的体验能力，不会成为其他连接器必须实现的共性接口。命令名称、菜单说明和 `/help` 文本由 Telegram Connector 内部的单一注册表生成，新增 Telegram 命令时不需要同步维护多份列表。
+
 ## 7. 身份、配对与授权
 
 初次使用时，用户在 Mac 设置窗口保存 Bot Token，并生成一个短期一次性配对码。Telegram 私聊 Bot 发送配对命令后，系统使用 Telegram 提供的数字用户 ID 和私聊会话 ID 完成授权。

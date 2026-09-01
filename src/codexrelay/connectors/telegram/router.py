@@ -13,6 +13,7 @@ from codexrelay.codex.model_catalog import (
 )
 from codexrelay.connectors.base import IncomingMessage
 from codexrelay.connectors.telegram.api import TelegramClient
+from codexrelay.connectors.telegram.commands import help_text
 from codexrelay.core import DeliveryTarget, RelayService
 from codexrelay.database import Database
 from codexrelay.models import Conversation, JobStatus, Project
@@ -95,12 +96,7 @@ class TelegramRouter:
 
         command, _, argument = message.text.strip().partition(" ")
         if command == "/help" or command == "/start":
-            await self._reply(
-                message,
-                "/projects 查看项目\n/use <编号或名称> 切换项目\n/new 新建对话\n"
-                "/models 查看模型\n/model <编号或名称> 选择模型\n"
-                "/reasoning <强度> 设置推理强度\n/status 查看状态\n/stop 终止当前任务",
-            )
+            await self._reply(message, help_text())
             return
         if command == "/projects":
             projects = await self.project_service.list_projects()
