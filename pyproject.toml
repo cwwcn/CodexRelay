@@ -28,7 +28,7 @@ gui = ["PySide6-Essentials>=6.9,<7"]
 packaging = ["PyInstaller>=6.16,<7"]
 dev = [
   "mypy>=1.17,<2",
-  "pytest>=8.4,<9",
+  "pytest>=9.0.3,<10",
   "pytest-asyncio>=1.1,<2",
   "ruff>=0.12,<1",
 ]
