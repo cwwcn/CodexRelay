@@ -43,7 +43,7 @@ jobs:
       - name: Create Intel DMG
         env:
           CODEXRELAY_ARCH: x86_64
-          CODEXRELAY_RELEASE_DIR: "$RUNNER_TEMP/release"
+          CODEXRELAY_RELEASE_DIR: ${{ runner.temp }}/release
         run: ./scripts/create_dmg.sh "$CODEXRELAY_APP"
 
       - name: Upload Intel DMG to release
