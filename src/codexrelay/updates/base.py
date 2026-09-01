@@ -1,19 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import StrEnum
 from typing import Protocol
-
-
-class UpdateChannel(StrEnum):
-    STABLE = "stable"
-    BETA = "beta"
 
 
 @dataclass(frozen=True, slots=True)
 class UpdateState:
     enabled: bool
-    channel: UpdateChannel
     checking: bool = False
     available_version: str | None = None
     message: str = ""

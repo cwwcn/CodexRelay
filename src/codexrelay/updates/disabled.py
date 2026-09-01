@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from codexrelay.updates.base import UpdateChannel, UpdateState
+from codexrelay.updates.base import UpdateState
 
 
 class DisabledUpdateProvider:
-    def __init__(self, channel: UpdateChannel = UpdateChannel.STABLE) -> None:
+    def __init__(self) -> None:
         self._state = UpdateState(
             enabled=False,
-            channel=channel,
             message="自动更新将在正式 GitHub 发行版中启用",
         )
 

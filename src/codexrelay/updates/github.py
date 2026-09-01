@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 
-from codexrelay.updates.base import UpdateChannel, UpdateState
+from codexrelay.updates.base import UpdateState
 from codexrelay.version import __version__
 
 
@@ -26,7 +26,6 @@ class GitHubReleaseUpdateProvider:
 
     def __init__(
         self,
-        channel: UpdateChannel = UpdateChannel.STABLE,
         *,
         owner: str | None = None,
         repository: str | None = None,
@@ -37,16 +36,12 @@ class GitHubReleaseUpdateProvider:
         self.timeout = timeout
         self._state = UpdateState(
             enabled=True,
-            channel=channel,
             message="尚未检查更新",
         )
 
     @property
     def state(self) -> UpdateState:
         return self._state
-
-    def set_channel(self, channel: UpdateChannel) -> None:
-        self._state = replace(self._state, channel=channel)
 
     @property
     def releases_url(self) -> str:
@@ -61,7 +56,7 @@ class GitHubReleaseUpdateProvider:
                 self._state = replace(
                     self._state,
                     checking=False,
-                    message="暂未找到符合当前更新频道的公开发行版",
+                    message="暂未找到公开发行版",
                     available_version=None,
                     release_url=self.releases_url,
                     published_at=None,
@@ -110,7 +105,7 @@ class GitHubReleaseUpdateProvider:
         for item in payload:
             if not isinstance(item, dict) or bool(item.get("draft")):
                 continue
-            if self._state.channel is UpdateChannel.STABLE and bool(item.get("prerelease")):
+            if bool(item.get("prerelease")):
                 continue
             return item
         return None

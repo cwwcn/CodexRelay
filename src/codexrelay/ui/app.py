@@ -36,6 +36,7 @@ from PySide6.QtGui import (
     QPixmap,
 )
 from PySide6.QtWidgets import (
+    QAbstractButton,
     QApplication,
     QCheckBox,
     QFileDialog,
@@ -76,7 +77,6 @@ from codexrelay.startup import StartupService
 from codexrelay.ui.state import AppStatusSnapshot, RuntimeState
 from codexrelay.updates import (
     GitHubReleaseUpdateProvider,
-    UpdateChannel,
     UpdateProvider,
     UpdateState,
 )
@@ -327,6 +327,39 @@ class AboutMark(QWidget):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor("#8FE0BD"))
         painter.drawEllipse(QRectF(47, 16, 10, 10))
+
+
+class ToggleSwitch(QAbstractButton):
+    """Small keyboard-accessible switch matching the macOS on/off pattern."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setCheckable(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setFixedSize(44, 26)
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        track = QRectF(1.5, 3.5, 41.0, 19.0)
+        if self.hasFocus():
+            painter.setPen(QPen(QColor("#88B9E2"), 2.0))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(QRectF(0.5, 2.5, 43.0, 21.0), 10.5, 10.5)
+        painter.setPen(Qt.PenStyle.NoPen)
+        if not self.isEnabled():
+            track_color = QColor("#D8DEE4")
+        elif self.isChecked():
+            track_color = QColor("#1677E8")
+        else:
+            track_color = QColor("#B8C1CA")
+        painter.setBrush(track_color)
+        painter.drawRoundedRect(track, 9.5, 9.5)
+        knob_x = 23.0 if self.isChecked() else 3.0
+        painter.setBrush(QColor("#FFFFFF"))
+        painter.drawEllipse(QRectF(knob_x, 5.0, 16.0, 16.0))
 
 
 class MenuOverview(QWidget):
@@ -583,13 +616,6 @@ class SettingsWindow(QMainWindow):
 
     def set_update_provider(self, provider: UpdateProvider) -> None:
         self.update_provider = provider
-        if isinstance(provider, GitHubReleaseUpdateProvider):
-            channel = (
-                UpdateChannel.BETA
-                if self.settings.app.update_channel == UpdateChannel.BETA.value
-                else UpdateChannel.STABLE
-            )
-            provider.set_channel(channel)
         self._refresh_update_view()
 
     @staticmethod
@@ -837,41 +863,28 @@ class SettingsWindow(QMainWindow):
 
         update_card = QFrame()
         update_card.setObjectName("aboutCard")
-        update_card.setFixedHeight(170)
+        update_card.setFixedHeight(150)
         update_layout = QVBoxLayout(update_card)
         update_layout.setContentsMargins(14, 10, 14, 10)
         update_layout.setSpacing(5)
         update_heading = QLabel("更新")
         update_heading.setObjectName("aboutSectionTitle")
         update_layout.addWidget(update_heading)
+        update_hint = QLabel("从 GitHub Releases 获取正式版本")
+        update_hint.setObjectName("aboutMeta")
+        update_layout.addWidget(update_hint)
 
         auto_row = QHBoxLayout()
         auto_label = QLabel("自动检查更新")
         auto_label.setObjectName("aboutRowTitle")
-        self.auto_update_checks = QCheckBox()
+        self.auto_update_checks = ToggleSwitch()
+        self.auto_update_checks.setAccessibleName("自动检查更新")
         self.auto_update_checks.setChecked(self.settings.app.update_checks_automatically)
         self.auto_update_checks.toggled.connect(self._save_update_settings)
         auto_row.addWidget(auto_label)
         auto_row.addStretch(1)
         auto_row.addWidget(self.auto_update_checks)
         update_layout.addLayout(auto_row)
-
-        channel_row = QHBoxLayout()
-        channel_label = QLabel("更新频道")
-        channel_label.setObjectName("aboutRowTitle")
-        self.update_channel_combo = ChoiceButton()
-        self.update_channel_combo.setFixedWidth(132)
-        self.update_channel_combo.setFixedHeight(34)
-        self.update_channel_combo.addItem("稳定版", UpdateChannel.STABLE.value)
-        self.update_channel_combo.addItem("测试版", UpdateChannel.BETA.value)
-        self.update_channel_combo.setCurrentIndex(
-            1 if self.settings.app.update_channel == UpdateChannel.BETA.value else 0
-        )
-        self.update_channel_combo.currentIndexChanged.connect(self._save_update_settings)
-        channel_row.addWidget(channel_label)
-        channel_row.addStretch(1)
-        channel_row.addWidget(self.update_channel_combo)
-        update_layout.addLayout(channel_row)
 
         check_row = QHBoxLayout()
         self.update_status = QLabel("尚未检查更新")
@@ -887,7 +900,7 @@ class SettingsWindow(QMainWindow):
 
         links_card = QFrame()
         links_card.setObjectName("aboutCard")
-        links_card.setFixedHeight(170)
+        links_card.setFixedHeight(150)
         links_layout = QVBoxLayout(links_card)
         links_layout.setContentsMargins(14, 10, 14, 10)
         links_layout.setSpacing(3)
@@ -915,23 +928,17 @@ class SettingsWindow(QMainWindow):
     def _save_update_settings(self, _value: object = None) -> None:
         if not hasattr(self, "auto_update_checks"):
             return
-        channel = str(self.update_channel_combo.currentData() or UpdateChannel.STABLE.value)
         self.settings = Settings(
             app=AppSection(
                 auto_connect=self.settings.app.auto_connect,
                 launch_at_login=self.settings.app.launch_at_login,
                 prevent_sleep_while_running=self.settings.app.prevent_sleep_while_running,
                 update_checks_automatically=self.auto_update_checks.isChecked(),
-                update_channel=channel,
             ),
             telegram=self.settings.telegram,
             projects=self.settings.projects,
         )
         self.settings_store.save(self.settings)
-        if isinstance(self.update_provider, GitHubReleaseUpdateProvider):
-            self.update_provider.set_channel(
-                UpdateChannel.BETA if channel == UpdateChannel.BETA.value else UpdateChannel.STABLE
-            )
         self._refresh_update_view()
 
     def _refresh_update_view(self) -> None:
@@ -1306,7 +1313,6 @@ class SettingsWindow(QMainWindow):
                 launch_at_login=self.launch_at_login.isChecked(),
                 prevent_sleep_while_running=self.prevent_sleep.isChecked(),
                 update_checks_automatically=self.settings.app.update_checks_automatically,
-                update_channel=self.settings.app.update_channel,
             ),
             telegram=self.settings.telegram,
             projects=self.settings.projects,

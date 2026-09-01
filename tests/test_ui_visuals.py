@@ -10,10 +10,11 @@ from codexrelay.ui.app import (
     AsyncWorker,
     ChoiceButton,
     MenuOverview,
+    ToggleSwitch,
     make_icon,
 )
 from codexrelay.ui.state import AppStatusSnapshot, RuntimeState
-from codexrelay.updates import DisabledUpdateProvider, UpdateChannel
+from codexrelay.updates import DisabledUpdateProvider
 
 
 def test_tray_icon_is_a_macos_adaptive_mask() -> None:
@@ -70,6 +71,21 @@ def test_choice_button_supports_combo_box_selection_api() -> None:
     assert changes[-1] == 1
 
 
+def test_toggle_switch_exposes_binary_state_without_checkbox_indicator() -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    application = QApplication.instance() or QApplication([])
+    switch = ToggleSwitch()
+
+    assert application is not None
+    assert switch.isCheckable()
+    assert not switch.isChecked()
+    assert switch.size() == QSize(44, 26)
+
+    switch.click()
+
+    assert switch.isChecked()
+
+
 def test_async_workers_are_released_by_the_ui_thread() -> None:
     async def operation() -> object:
         return None
@@ -102,8 +118,7 @@ def test_menu_overview_renders_connected_project_and_task_state() -> None:
 
 
 def test_updates_are_disabled_until_a_signed_release_provider_is_configured() -> None:
-    provider = DisabledUpdateProvider(UpdateChannel.BETA)
+    provider = DisabledUpdateProvider()
 
     assert not provider.state.enabled
-    assert provider.state.channel is UpdateChannel.BETA
     assert "正式 GitHub 发行版" in provider.state.message
