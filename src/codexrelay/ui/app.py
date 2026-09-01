@@ -49,7 +49,6 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
-    QScrollArea,
     QStackedWidget,
     QSystemTrayIcon,
     QVBoxLayout,
@@ -781,26 +780,17 @@ class SettingsWindow(QMainWindow):
         return page
 
     def _about_page(self) -> QWidget:
-        page, page_layout = self._page("关于", "CodexRelay 的版本、发行信息与更新")
-        scroll = QScrollArea()
-        scroll.setObjectName("aboutScroll")
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        content = QWidget()
-        layout = QVBoxLayout(content)
-        layout.setContentsMargins(0, 0, 8, 0)
-        layout.setSpacing(14)
-        scroll.setWidget(content)
-        page_layout.addWidget(scroll, 1)
+        page, layout = self._page("关于", "CodexRelay 的版本、发行信息与更新")
+        layout.setSpacing(10)
 
         hero = QFrame()
         hero.setObjectName("aboutHero")
-        hero.setMinimumHeight(118)
+        hero.setMinimumHeight(98)
         hero_layout = QHBoxLayout(hero)
-        hero_layout.setContentsMargins(20, 18, 20, 18)
+        hero_layout.setContentsMargins(16, 12, 16, 12)
         hero_layout.setSpacing(16)
         logo = AboutMark()
+        logo.setFixedSize(60, 60)
         hero_layout.addWidget(logo, alignment=Qt.AlignmentFlag.AlignTop)
         identity = QVBoxLayout()
         identity.setSpacing(3)
