@@ -109,7 +109,16 @@ def test_codex_discovery_includes_common_gui_launch_paths() -> None:
     entries = environment["PATH"].split(":")
     assert str(Path.home() / ".npm-global" / "bin") in entries
     assert "/usr/local/bin" in entries
-    assert discover_codex_bin(environment["PATH"]) is not None
+
+
+def test_codex_discovery_finds_executable_without_system_install(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_codex = fake_bin / "codex"
+    fake_codex.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_codex.chmod(0o755)
+
+    assert discover_codex_bin(str(fake_bin)) == str(fake_codex)
 
 
 def test_human_approval_does_not_use_sdk_auto_reviewer() -> None:
