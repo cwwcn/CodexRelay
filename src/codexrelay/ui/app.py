@@ -782,6 +782,27 @@ class SettingsWindow(QMainWindow):
         hero_layout.addLayout(identity, 1)
         layout.addWidget(hero)
 
+        meta_card = QFrame()
+        meta_card.setObjectName("aboutCard")
+        meta_layout = QHBoxLayout(meta_card)
+        meta_layout.setContentsMargins(16, 10, 16, 10)
+        meta_layout.setSpacing(20)
+        for label, value in (
+            ("发行状态", "Early Preview"),
+            ("平台", "macOS · Apple Silicon"),
+            ("许可证", "MIT"),
+        ):
+            column = QVBoxLayout()
+            column.setSpacing(2)
+            caption = QLabel(label)
+            caption.setObjectName("aboutMetaLabel")
+            detail = QLabel(value)
+            detail.setObjectName("aboutMetaValue")
+            column.addWidget(caption)
+            column.addWidget(detail)
+            meta_layout.addLayout(column, 1)
+        layout.addWidget(meta_card)
+
         update_title = QLabel("更新")
         update_title.setObjectName("aboutSectionTitle")
         layout.addWidget(update_title)
@@ -1727,6 +1748,8 @@ QLabel#aboutAppName { color: #18202A; font-size: 23px; font-weight: 700; }
 QLabel#aboutTagline { color: #536574; font-size: 13px; }
 QLabel#aboutVersion { color: #246AA5; font-size: 13px; font-weight: 700; }
 QLabel#aboutMeta { color: #74818B; font-size: 11px; }
+QLabel#aboutMetaLabel { color: #82909B; font-size: 10px; font-weight: 650; }
+QLabel#aboutMetaValue { color: #2A3945; font-size: 12px; font-weight: 650; }
 QLabel#aboutSectionTitle { color: #18202A; font-size: 16px; font-weight: 700; padding-top: 7px; }
 QFrame#aboutCard { background: #FFFFFF; border: 1px solid #DDE3E9; border-radius: 14px; }
 QLabel#aboutRowTitle { color: #273541; font-size: 13px; font-weight: 600; padding: 9px 0; }
