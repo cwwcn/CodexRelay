@@ -45,7 +45,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QFrame,
-    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -372,18 +371,13 @@ class QuitConfirmationDialog(QDialog):
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
         self.setWindowModality(Qt.WindowModality.ApplicationModal)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setFixedSize(448, 244 if active_count else 232)
+        self.setFixedSize(448, 232 if active_count else 220)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(18, 18, 18, 22)
         outer.setSpacing(0)
         card = QFrame()
         card.setObjectName("quitCard")
-        shadow = QGraphicsDropShadowEffect(card)
-        shadow.setBlurRadius(38)
-        shadow.setOffset(0, 10)
-        shadow.setColor(QColor(15, 31, 47, 58))
-        card.setGraphicsEffect(shadow)
         outer.addWidget(card)
 
         content = QVBoxLayout(card)
@@ -423,7 +417,7 @@ class QuitConfirmationDialog(QDialog):
         actions.addStretch(1)
         self.cancel_button = QPushButton("取消")
         self.cancel_button.setObjectName("quitCancelButton")
-        self.cancel_button.setFixedHeight(34)
+        self.cancel_button.setFixedHeight(32)
         self.cancel_button.setMinimumWidth(82)
         self.cancel_button.clicked.connect(self.reject)
         self.cancel_button.setDefault(True)
@@ -432,7 +426,7 @@ class QuitConfirmationDialog(QDialog):
         self.confirm_button.setObjectName(
             "quitDangerButton" if active_count else "quitPrimaryButton"
         )
-        self.confirm_button.setFixedHeight(34)
+        self.confirm_button.setFixedHeight(32)
         self.confirm_button.setMinimumWidth(96 if active_count else 82)
         self.confirm_button.setAutoDefault(False)
         self.confirm_button.clicked.connect(self.accept)
@@ -1852,7 +1846,8 @@ QLabel#quitTitle { color: #1C1C1E; font-size: 17px; font-weight: 700; }
 QLabel#quitMessage { color: #636A73; font-size: 13px; line-height: 1.35; }
 QFrame#quitDivider { background: #E5E7EB; max-height: 1px; border: 0; }
 QPushButton#quitCancelButton, QPushButton#quitPrimaryButton, QPushButton#quitDangerButton {
-    min-height: 34px; padding: 6px 16px; border-radius: 9px; font-size: 13px; font-weight: 600; }
+    min-height: 30px; max-height: 30px; padding: 0 14px; border-radius: 8px;
+    font-size: 12px; font-weight: 600; }
 QPushButton#quitCancelButton { background: rgba(233, 237, 242, 190); color: #30343A;
     border: 1px solid rgba(190, 199, 208, 170); }
 QPushButton#quitCancelButton:hover { background: rgba(222, 228, 235, 220); }
