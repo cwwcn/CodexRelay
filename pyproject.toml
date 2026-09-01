@@ -1,0 +1,62 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "codexrelay"
+dynamic = ["version"]
+description = "A local macOS relay between Telegram and Codex."
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+keywords = ["macos", "telegram", "codex", "relay", "menu-bar"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: MacOS X",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Communications :: Chat",
+]
+dependencies = [
+  "aiosqlite>=0.21,<1",
+  "httpx>=0.28,<1",
+  "keyring>=25.6,<26",
+  "openai-codex>=0.1.0,<1",
+  "platformdirs>=4.3,<5",
+  "tomli-w>=1.2,<2",
+]
+
+[project.optional-dependencies]
+gui = ["PySide6-Essentials>=6.9,<7"]
+packaging = ["PyInstaller>=6.16,<7"]
+dev = [
+  "mypy>=1.17,<2",
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.1,<2",
+  "ruff>=0.12,<1",
+]
+
+[project.scripts]
+codexrelay = "codexrelay.cli:main"
+codexrelay-gui = "codexrelay.ui.app:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/codexrelay"]
+
+[tool.hatch.version]
+path = "src/codexrelay/version.py"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
+ignore = ["ASYNC240", "RUF001"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["codexrelay"]
