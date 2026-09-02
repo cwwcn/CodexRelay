@@ -538,6 +538,21 @@ class Database:
         )
         return await cursor.fetchone() is not None
 
+    async def has_enabled_identity(self, *, connector_type: str, account_id: str) -> bool:
+        """Return whether an account has a currently enabled paired identity."""
+        cursor = await self.connection.execute(
+            """
+            SELECT 1
+            FROM external_identities e
+            JOIN local_users u ON u.id=e.local_user_id
+            WHERE e.connector_type=? AND e.account_id=?
+              AND e.enabled=1 AND u.enabled=1
+            LIMIT 1
+            """,
+            (connector_type, account_id),
+        )
+        return await cursor.fetchone() is not None
+
     async def create_conversation(
         self,
         project_id: str,

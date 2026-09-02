@@ -11,6 +11,9 @@ from codexrelay.pairing import PairingError, PairingService
 async def test_pairing_code_is_single_use_and_authorizes_identity(tmp_path: Path) -> None:
     async with Database(tmp_path / "state.db") as database:
         service = PairingService(database)
+        assert not await database.has_enabled_identity(
+            connector_type="telegram", account_id="main-bot"
+        )
         challenge = await service.generate()
         user_id = await service.pair(
             code=challenge.code,
@@ -22,6 +25,9 @@ async def test_pairing_code_is_single_use_and_authorizes_identity(tmp_path: Path
         assert user_id
         assert await database.is_authorized_identity(
             connector_type="telegram", account_id="main-bot", external_user_id="123"
+        )
+        assert await database.has_enabled_identity(
+            connector_type="telegram", account_id="main-bot"
         )
         with pytest.raises(PairingError, match="no active"):
             await service.pair(

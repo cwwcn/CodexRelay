@@ -129,11 +129,27 @@ def test_menu_overview_renders_connected_project_and_task_state() -> None:
     )
 
     assert application is not None
-    assert overview.connection.text() == "已连接"
+    assert overview.connection.text() == "Telegram 已连接 · 待完成配对"
     assert overview.project.text() == "CodexRelay"
     assert overview.task.text() == "空闲"
     assert overview.session_value.text() == "gpt-5.6-sol · medium"
     assert overview.task_detail.text() == "没有运行中的任务"
+
+
+def test_menu_overview_renders_paired_telegram_state() -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    application = QApplication.instance() or QApplication([])
+    overview = MenuOverview()
+    overview.set_snapshot(
+        AppStatusSnapshot(
+            runtime_state=RuntimeState.CONNECTED,
+            bot_username="cwwen_codexrelay_bot",
+            telegram_paired=True,
+        )
+    )
+
+    assert application is not None
+    assert overview.connection.text() == "Telegram 已连接 · 已配对"
 
 
 def test_updates_are_disabled_until_a_signed_release_provider_is_configured() -> None:

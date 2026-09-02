@@ -19,6 +19,7 @@ class RuntimeState(StrEnum):
 class AppStatusSnapshot:
     runtime_state: RuntimeState = RuntimeState.STARTING
     bot_username: str | None = None
+    telegram_paired: bool = False
     current_project: str | None = None
     active_project: str | None = None
     active_job_count: int = 0
@@ -29,8 +30,13 @@ class AppStatusSnapshot:
 
     @property
     def connection_title(self) -> str:
+        if self.runtime_state is RuntimeState.CONNECTED:
+            return (
+                "Telegram 已连接 · 已配对"
+                if self.telegram_paired
+                else "Telegram 已连接 · 待完成配对"
+            )
         return {
-            RuntimeState.CONNECTED: "已连接",
             RuntimeState.STARTING: "正在连接",
             RuntimeState.RESTARTING: "正在重连",
             RuntimeState.ATTENTION: "需要处理",
@@ -57,6 +63,7 @@ class AppStatusSnapshot:
     def persisted(
         self,
         *,
+        telegram_paired: bool,
         current_project: str | None,
         active_project: str | None,
         active_job_count: int,
@@ -66,6 +73,7 @@ class AppStatusSnapshot:
     ) -> AppStatusSnapshot:
         return replace(
             self,
+            telegram_paired=telegram_paired,
             current_project=current_project,
             active_project=active_project,
             active_job_count=active_job_count,

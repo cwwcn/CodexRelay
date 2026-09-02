@@ -1905,20 +1905,45 @@ class TrayApplication(QObject):
                 active_project = await database.active_job_project()
                 active_count = await database.active_job_count()
                 active_status = await database.active_job_status()
+                telegram_paired = await database.has_enabled_identity(
+                    connector_type="telegram", account_id="main-bot"
+                )
                 conversation = (
                     None
                     if current is None
                     else await database.active_conversation(current.id)
                 )
-                return current, active_project, active_count, active_status, conversation
+                return (
+                    current,
+                    active_project,
+                    active_count,
+                    active_status,
+                    conversation,
+                    telegram_paired,
+                )
 
         def finished(value: object) -> None:
             self._status_refresh_running = False
-            current, active_project, active_count, active_status, conversation = cast(
-                tuple[Project | None, Project | None, int, JobStatus | None, Conversation | None],
+            (
+                current,
+                active_project,
+                active_count,
+                active_status,
+                conversation,
+                telegram_paired,
+            ) = cast(
+                tuple[
+                    Project | None,
+                    Project | None,
+                    int,
+                    JobStatus | None,
+                    Conversation | None,
+                    bool,
+                ],
                 value,
             )
             self.snapshot = self.snapshot.persisted(
+                telegram_paired=telegram_paired,
                 current_project=None if current is None else current.name,
                 active_project=None if active_project is None else active_project.name,
                 active_job_count=active_count,
