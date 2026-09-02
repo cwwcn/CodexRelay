@@ -64,6 +64,54 @@ def test_provider_reports_latest_when_release_is_not_newer(monkeypatch: Any) -> 
     assert "最新版本" in state.message
 
 
+def test_provider_detects_same_version_rebuilt_asset(monkeypatch: Any) -> None:
+    payload = [
+        {
+            "tag_name": "v0.1.1",
+            "html_url": "https://example.test/release",
+            "assets": [
+                {
+                    "name": "CodexRelay-macos-arm64-v0.1.1.dmg",
+                    "browser_download_url": "https://example.test/fixed.dmg",
+                    "digest": "sha256:" + "c" * 64,
+                    "updated_at": "2026-09-02T09:52:24Z",
+                }
+            ],
+        }
+    ]
+    monkeypatch.setattr(httpx, "get", lambda *args, **kwargs: FakeResponse(payload))
+    monkeypatch.setattr("codexrelay.updates.github.__build_time__", "2026-09-02 09:10 UTC")
+
+    state = GitHubReleaseUpdateProvider().check_for_updates()
+
+    assert state.available_version == "0.1.1"
+    assert state.asset_name == "CodexRelay-macos-arm64-v0.1.1.dmg"
+    assert "修复版" in state.message
+
+
+def test_provider_does_not_detect_older_same_version_asset(monkeypatch: Any) -> None:
+    payload = [
+        {
+            "tag_name": "v0.1.1",
+            "assets": [
+                {
+                    "name": "CodexRelay-macos-arm64-v0.1.1.dmg",
+                    "browser_download_url": "https://example.test/old.dmg",
+                    "digest": "sha256:" + "d" * 64,
+                    "updated_at": "2026-09-02T09:00:00Z",
+                }
+            ],
+        }
+    ]
+    monkeypatch.setattr(httpx, "get", lambda *args, **kwargs: FakeResponse(payload))
+    monkeypatch.setattr("codexrelay.updates.github.__build_time__", "2026-09-02 09:10 UTC")
+
+    state = GitHubReleaseUpdateProvider().check_for_updates()
+
+    assert state.available_version is None
+    assert "最新版本" in state.message
+
+
 def test_provider_selects_matching_architecture_asset(monkeypatch: Any, tmp_path: Path) -> None:
     payload = [
         {

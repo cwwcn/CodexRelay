@@ -5,13 +5,14 @@ import os
 import platform
 import re
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import httpx
 
 from codexrelay.updates.base import UpdateState
-from codexrelay.version import __version__
+from codexrelay.version import __build_time__, __version__
 
 
 def _version_tuple(value: str) -> tuple[int, ...]:
@@ -96,7 +97,14 @@ class GitHubReleaseUpdateProvider:
             version = tag.removeprefix("v")
             is_newer = _version_tuple(version) > _version_tuple(__version__)
             asset = self._select_asset(release)
-            available = version if is_newer else None
+            same_version_fix = bool(
+                asset
+                and not is_newer
+                and _version_tuple(version) == _version_tuple(__version__)
+                and self._asset_is_newer_build(asset[3])
+            )
+            update_available = is_newer or same_version_fix
+            available = version if update_available else None
             downloaded_path = self._state.downloaded_path
             if asset is not None and downloaded_path is not None:
                 if Path(downloaded_path).name != asset[0] or not Path(downloaded_path).is_file():
@@ -105,6 +113,8 @@ class GitHubReleaseUpdateProvider:
                 message = f"发现新版本 {version}，但暂未提供当前 Mac 的安装包"
             elif is_newer:
                 message = f"发现新版本 {version} · {self.architecture} 安装包可用"
+            elif same_version_fix:
+                message = f"发现当前版本的修复版 {version} · {self.architecture} 安装包可用"
             else:
                 message = f"当前已是最新版本（{__version__}）"
             self._state = replace(
@@ -118,7 +128,7 @@ class GitHubReleaseUpdateProvider:
                 asset_name=None if asset is None else asset[0],
                 asset_url=None if asset is None else asset[1],
                 asset_digest=None if asset is None else asset[2],
-                downloaded_path=downloaded_path if is_newer else None,
+                downloaded_path=downloaded_path if update_available else None,
             )
         except httpx.HTTPStatusError as error:
             status = error.response.status_code
@@ -244,7 +254,9 @@ class GitHubReleaseUpdateProvider:
             return item
         return None
 
-    def _select_asset(self, release: dict[str, Any]) -> tuple[str, str, str | None] | None:
+    def _select_asset(
+        self, release: dict[str, Any]
+    ) -> tuple[str, str, str | None, str | None] | None:
         assets = release.get("assets")
         if not isinstance(assets, list):
             return None
@@ -261,8 +273,22 @@ class GitHubReleaseUpdateProvider:
             normalized_digest = (
                 str(digest).removeprefix("sha256:") if isinstance(digest, str) else None
             )
-            return name, url, normalized_digest
+            updated_at = item.get("updated_at")
+            return name, url, normalized_digest, str(updated_at) if updated_at else None
         return None
+
+    @staticmethod
+    def _asset_is_newer_build(updated_at: str | None) -> bool:
+        if not updated_at or __build_time__ == "Source build":
+            return False
+        try:
+            asset_time = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+            build_time = datetime.strptime(__build_time__, "%Y-%m-%d %H:%M UTC").replace(
+                tzinfo=UTC
+            )
+        except ValueError:
+            return False
+        return asset_time > build_time
 
     def _fetch_checksum(self, asset_name: str) -> str | None:
         if self._release is None:
