@@ -770,6 +770,8 @@ class SettingsWindow(QMainWindow):
         super().__init__()
         self.paths = paths
         self.pool = pool
+        self._telegram_username: str | None = None
+        self._telegram_paired = False
         self.settings_store = SettingsStore(paths.settings)
         self.settings = self.settings_store.load()
         self.secret_store = SecretStore(paths.telegram_tokens)
@@ -940,12 +942,13 @@ class SettingsWindow(QMainWindow):
         self.pairing_code.setObjectName("pairingCode")
         self.pairing_hint = QLabel("生成后10分钟内，在Telegram发送 /pair 配对码")
         self.pairing_hint.setObjectName("hint")
-        pair_button = QPushButton("生成一次性配对码")
-        pair_button.clicked.connect(self._generate_pairing_code)
+        self.pair_button = QPushButton("生成一次性配对码")
+        self.pair_button.setObjectName("secondaryButton")
+        self.pair_button.clicked.connect(self._generate_pairing_code)
         layout.addWidget(pair_label)
         layout.addWidget(self.pairing_code)
         layout.addWidget(self.pairing_hint)
-        layout.addWidget(pair_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(self.pair_button, alignment=Qt.AlignmentFlag.AlignLeft)
         layout.addStretch(1)
         return page
 
@@ -1720,9 +1723,31 @@ class SettingsWindow(QMainWindow):
         self.runtime_configuration_changed.emit()
 
     def set_runtime_connected(self, username: str) -> None:
-        self.telegram_status.set_state("ready", f"@{username} 已连接")
+        self._telegram_username = username
+        self._update_telegram_status()
         self.codex_status.set_state("ready", "App Server已就绪")
         self._refresh_overview()
+
+    def set_telegram_pairing_state(self, paired: bool) -> None:
+        was_paired = self._telegram_paired
+        self._telegram_paired = paired
+        self.pair_button.setEnabled(not paired)
+        self.pair_button.setText("已配对" if paired else "生成一次性配对码")
+        if paired:
+            self.pairing_hint.setText("当前 Telegram 账号已完成配对。配对失效后可重新生成。")
+        elif was_paired:
+            self.pairing_code.setText("—— —— ——")
+            self.pairing_hint.setText("生成后10分钟内，在Telegram发送 /pair 配对码")
+        self._update_telegram_status()
+        self._refresh_overview()
+
+    def _update_telegram_status(self) -> None:
+        if self._telegram_username is None:
+            return
+        pairing_title = "已配对" if self._telegram_paired else "待完成配对"
+        self.telegram_status.set_state(
+            "ready", f"@{self._telegram_username} · 已连接 · {pairing_title}"
+        )
 
     def set_runtime_failed(self, message: str) -> None:
         if "Token is not configured" in message:
@@ -1952,6 +1977,7 @@ class TrayApplication(QObject):
                 reasoning_effort=None if conversation is None else conversation.reasoning_effort,
             )
             self.overview.set_snapshot(self.snapshot)
+            self.window.set_telegram_pairing_state(telegram_paired)
             self.stop_action.setEnabled(active_count > 0)
             self.tray.setToolTip(f"CodexRelay · {self.snapshot.connection_title}")
 
