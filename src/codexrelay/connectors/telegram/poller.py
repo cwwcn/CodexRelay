@@ -89,8 +89,21 @@ class TelegramPoller:
         await self.recover_pending(handler)
         delay = 1.0
         while not stop.is_set():
+            poll_task = asyncio.create_task(self.poll_once(handler, background_handlers=True))
+            stop_task = asyncio.create_task(stop.wait())
+            done, _pending = await asyncio.wait(
+                (poll_task, stop_task), return_when=asyncio.FIRST_COMPLETED
+            )
+            if stop_task in done:
+                poll_task.cancel()
+                await asyncio.gather(poll_task, return_exceptions=True)
+                stop_task.cancel()
+                await asyncio.gather(stop_task, return_exceptions=True)
+                break
+            stop_task.cancel()
+            await asyncio.gather(stop_task, return_exceptions=True)
             try:
-                await self.poll_once(handler, background_handlers=True)
+                await poll_task
                 delay = 1.0
             except TelegramAPIError as error:
                 delay = float(error.retry_after or min(delay * 2, 30))

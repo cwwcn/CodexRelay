@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,25 @@ class FakeUpdateClient:
     ) -> list[dict[str, Any]]:
         self.offsets.append(offset)
         return self.updates
+
+
+class BlockingUpdateClient:
+    def __init__(self) -> None:
+        self.cancelled = False
+        self.started = asyncio.Event()
+        self._never = asyncio.Event()
+
+    async def get_updates(
+        self, *, offset: int | None, poll_timeout: int = 30, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        del offset, poll_timeout, limit
+        try:
+            self.started.set()
+            await self._never.wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        return []
 
 
 @pytest.mark.asyncio
@@ -81,3 +101,21 @@ async def test_failed_handler_is_recoverable_without_stopping_batch(tmp_path: Pa
         )
         assert len(pending) == 1
         assert pending[0][1]["update_id"] == 1
+
+
+@pytest.mark.asyncio
+async def test_poller_cancels_long_poll_when_stop_is_requested(tmp_path: Path) -> None:
+    client = BlockingUpdateClient()
+
+    async def handler(_event_id: str, _message: IncomingMessage) -> None:
+        raise AssertionError("no update should be dispatched")
+
+    async with Database(tmp_path / "state.db") as database:
+        poller = TelegramPoller(database=database, client=client)
+        stop = asyncio.Event()
+        task = asyncio.create_task(poller.run(handler, stop))
+        await asyncio.wait_for(client.started.wait(), timeout=1)
+        stop.set()
+        await asyncio.wait_for(task, timeout=1)
+
+    assert client.cancelled

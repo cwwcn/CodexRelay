@@ -2059,6 +2059,11 @@ class TrayApplication(QObject):
         self.status_timer.stop()
         self.snapshot = replace(self.snapshot, runtime_state=RuntimeState.STOPPING)
         self.overview.set_snapshot(self.snapshot)
+        # Make the user-visible quit instantaneous. The runtime thread still
+        # performs its orderly shutdown in the background; keeping the tray
+        # icon visible until then makes a normal network drain look like a hang.
+        self.tray.hide()
+        self.window.hide()
         self.restart_action.setEnabled(False)
         self.stop_action.setEnabled(False)
         self.tray_quit_action.setEnabled(False)
@@ -2081,6 +2086,9 @@ class TrayApplication(QObject):
             last_error="后台服务仍在停止，请稍后再试。",
         )
         self.overview.set_snapshot(self.snapshot)
+        self.tray.show()
+        self.tray_quit_action.setEnabled(True)
+        self.quit_action.setEnabled(True)
         QMessageBox.warning(
             self.window,
             "退出未完成",
