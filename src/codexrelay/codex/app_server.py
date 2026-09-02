@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 
 from openai_codex import (
@@ -15,6 +15,7 @@ from openai_codex import (
     Sandbox,
     TextInput,
 )
+from openai_codex._run import _collect_async_turn_result
 from openai_codex.api import AsyncThread
 from openai_codex.async_client import AsyncCodexClient
 from openai_codex.client import ApprovalHandler, CodexClient
@@ -22,14 +23,20 @@ from openai_codex.generated.v2_all import (
     ApprovalsReviewer,
     AskForApproval,
     AskForApprovalValue,
+    ItemStartedNotification,
     ReasoningEffort,
+    ReasoningSummaryTextDeltaNotification,
     SandboxMode,
     ThreadResumeParams,
     ThreadStartParams,
+    TurnPlanUpdatedNotification,
+    TurnStartedNotification,
 )
+from openai_codex.models import Notification
 
-from codexrelay.codex.base import TurnResult
+from codexrelay.codex.base import ProgressCallback, TurnResult
 from codexrelay.codex.model_catalog import CodexModelCatalog, CodexModelOption
+from codexrelay.models import ProjectApprovalMode
 
 
 class CodexBackendError(RuntimeError):
@@ -53,10 +60,10 @@ class _ApprovalAsyncCodex(AsyncCodex):
         self._client = _ApprovalAsyncCodexClient(config, approval_handler)
 
     async def thread_start_with_user_approval(
-        self, *, cwd: str, model: str | None
+        self, *, cwd: str, model: str | None, approval_mode: ProjectApprovalMode
     ) -> AsyncThread:
         await self._ensure_initialized()
-        approval_policy, approvals_reviewer = user_approval_settings()
+        approval_policy, approvals_reviewer = approval_settings(approval_mode)
         params = ThreadStartParams(
             approval_policy=approval_policy,
             approvals_reviewer=approvals_reviewer,
@@ -68,10 +75,15 @@ class _ApprovalAsyncCodex(AsyncCodex):
         return AsyncThread(self, started.thread.id)
 
     async def thread_resume_with_user_approval(
-        self, thread_id: str, *, cwd: str, model: str | None
+        self,
+        thread_id: str,
+        *,
+        cwd: str,
+        model: str | None,
+        approval_mode: ProjectApprovalMode,
     ) -> AsyncThread:
         await self._ensure_initialized()
-        approval_policy, approvals_reviewer = user_approval_settings()
+        approval_policy, approvals_reviewer = approval_settings(approval_mode)
         params = ThreadResumeParams(
             thread_id=thread_id,
             approval_policy=approval_policy,
@@ -173,7 +185,9 @@ class AppServerBackend:
         thread_id: str | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        approval_mode: ProjectApprovalMode = ProjectApprovalMode.SAFE,
         on_turn_started: Callable[[str, str], Awaitable[None]] | None = None,
+        on_progress: ProgressCallback | None = None,
     ) -> TurnResult:
         client = self._require_client()
         resolved_project = project.expanduser().resolve(strict=True)
@@ -191,11 +205,16 @@ class AppServerBackend:
                 raise RuntimeError("user approval client is not configured")
             if thread_id is None:
                 thread = await client.thread_start_with_user_approval(
-                    cwd=str(resolved_project), model=model
+                    cwd=str(resolved_project),
+                    model=model,
+                    approval_mode=approval_mode,
                 )
             else:
                 thread = await client.thread_resume_with_user_approval(
-                    thread_id, cwd=str(resolved_project), model=model
+                    thread_id,
+                    cwd=str(resolved_project),
+                    model=model,
+                    approval_mode=approval_mode,
                 )
             turn_approval_mode = None
         else:
@@ -235,7 +254,12 @@ class AppServerBackend:
             await on_turn_started(thread.id, handle.id)
         self._active_turns[handle.id] = handle
         try:
-            result = await handle.run()
+            if on_progress is None:
+                result = await handle.run()
+            else:
+                result = await _collect_async_turn_result(
+                    self._stream_with_progress(handle, on_progress), turn_id=handle.id
+                )
         finally:
             self._active_turns.pop(handle.id, None)
         if result.final_response is None:
@@ -257,6 +281,16 @@ class AppServerBackend:
         if self._client is None:
             raise RuntimeError("Codex backend is not started")
         return self._client
+
+    async def _stream_with_progress(
+        self, handle: AsyncTurnHandle, callback: ProgressCallback
+    ) -> AsyncIterator[Notification]:
+        reasoning_summary: dict[str, str] = {}
+        async for event in handle.stream():
+            stage = _progress_stage(event, reasoning_summary)
+            if stage is not None:
+                await callback(stage)
+            yield event
 
 
 def codex_subprocess_environment() -> dict[str, str]:
@@ -282,8 +316,47 @@ def discover_codex_bin(search_path: str) -> str | None:
     return shutil.which("codex", path=search_path)
 
 
-def user_approval_settings() -> tuple[AskForApproval, ApprovalsReviewer]:
+def approval_settings(
+    mode: ProjectApprovalMode = ProjectApprovalMode.SAFE,
+) -> tuple[AskForApproval, ApprovalsReviewer]:
+    # Keep server-side request generation enabled in both modes. Project auto
+    # approval is deliberately implemented by ApprovalCoordinator so it can
+    # inspect scope and deny network/out-of-project requests.
+    del mode
     return (
         AskForApproval(root=AskForApprovalValue.on_request),
         ApprovalsReviewer.user,
     )
+
+
+def user_approval_settings() -> tuple[AskForApproval, ApprovalsReviewer]:
+    """Backward-compatible safe-mode settings helper."""
+    return approval_settings(ProjectApprovalMode.SAFE)
+
+
+def _progress_stage(event: Notification, reasoning_summary: dict[str, str]) -> str | None:
+    """Map Codex lifecycle events to safe, high-level user-facing summaries."""
+    payload = event.payload
+    if isinstance(payload, ReasoningSummaryTextDeltaNotification):
+        summary = reasoning_summary.get(payload.item_id, "") + payload.delta
+        reasoning_summary[payload.item_id] = summary[-360:]
+        compact = " ".join(summary.split())
+        if compact:
+            return f"正在分析：{compact[-240:]}"
+        return "正在分析请求…"
+    if isinstance(payload, TurnStartedNotification):
+        return "正在分析请求…"
+    if isinstance(payload, TurnPlanUpdatedNotification):
+        return "正在制定执行计划…"
+    if isinstance(payload, ItemStartedNotification):
+        item_type = payload.item.root.type
+        return {
+            "commandExecution": "正在执行本地操作…",
+            "fileChange": "正在整理文件变更…",
+            "mcpToolCall": "正在调用工具…",
+            "dynamicToolCall": "正在调用工具…",
+            "webSearch": "正在检索相关信息…",
+            "reasoning": "正在组织处理步骤…",
+            "plan": "正在制定执行计划…",
+        }.get(item_type, "正在处理…")
+    return None

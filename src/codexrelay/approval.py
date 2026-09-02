@@ -6,11 +6,13 @@ import json
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Literal
 
 from openai_codex.models import JsonObject
 
 from codexrelay.database import Database
+from codexrelay.models import Project, ProjectApprovalMode
 
 COMMAND_APPROVAL = "item/commandExecution/requestApproval"
 FILE_APPROVAL = "item/fileChange/requestApproval"
@@ -54,6 +56,14 @@ class ApprovalCoordinator:
         )
         if job_id is None or chat_id is None:
             return "decline"
+        project = await self.database.project_for_turn(turn_id)
+        if (
+            project is not None
+            and await self.database.project_approval_mode(project.id, account_id=self.account_id)
+            is ProjectApprovalMode.PROJECT_AUTO
+        ):
+            if self._auto_allows(method, params, project):
+                return "accept"
 
         nonce = secrets.token_urlsafe(18)
         nonce_hash = self._hash_nonce(nonce)
@@ -94,6 +104,75 @@ class ApprovalCoordinator:
             return "decline"
         finally:
             self._pending.pop(nonce_hash, None)
+
+    @staticmethod
+    def _auto_allows(method: str, params: JsonObject, project: Project) -> bool:
+        """Allow only project-scoped operations; fail closed for extra permissions."""
+        root = project.path.resolve()
+
+        def within(value: str) -> bool:
+            try:
+                Path(value).expanduser().resolve().relative_to(root)
+            except (OSError, ValueError):
+                return False
+            return True
+
+        if method == COMMAND_APPROVAL:
+            cwd = params.get("cwd")
+            if not isinstance(cwd, str) or not within(cwd):
+                return False
+            if params.get("networkApprovalContext") is not None:
+                return False
+            if params.get("proposedNetworkPolicyAmendments") is not None:
+                return False
+            actions = params.get("commandActions")
+            if isinstance(actions, list):
+                for action in actions:
+                    if not isinstance(action, dict):
+                        return False
+                    path = action.get("path")
+                    if path is not None and (not isinstance(path, str) or not within(path)):
+                        return False
+            return True
+        if method == FILE_APPROVAL:
+            grant_root = params.get("grantRoot")
+            if grant_root is None:
+                return True
+            if not isinstance(grant_root, str):
+                return False
+            return within(grant_root)
+        if method == PERMISSIONS_APPROVAL:
+            permissions = params.get("permissions")
+            if not isinstance(permissions, dict):
+                return False
+            network = permissions.get("network")
+            if isinstance(network, dict) and network.get("enabled") is True:
+                return False
+            filesystem = permissions.get("fileSystem")
+            if not isinstance(filesystem, dict):
+                return True
+            for key in ("read", "write"):
+                paths = filesystem.get(key)
+                if not isinstance(paths, list):
+                    continue
+                for value in paths:
+                    if not isinstance(value, str) or not within(value):
+                        return False
+            entries = filesystem.get("entries")
+            if entries is not None:
+                if not isinstance(entries, list):
+                    return False
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        return False
+                    path = entry.get("path")
+                    if not isinstance(path, dict) or path.get("type") != "path":
+                        return False
+                    value = path.get("path")
+                    if not isinstance(value, str) or not within(value):
+                        return False
+            return True
+        return False
 
     async def resolve_callback(
         self, callback_data: str

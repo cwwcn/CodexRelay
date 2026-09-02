@@ -10,10 +10,12 @@ from openai_codex.generated.v2_all import ApprovalsReviewer, AskForApprovalValue
 
 from codexrelay.codex.app_server import (
     AppServerBackend,
+    approval_settings,
     codex_subprocess_environment,
     discover_codex_bin,
     user_approval_settings,
 )
+from codexrelay.models import ProjectApprovalMode
 
 
 @dataclass
@@ -123,6 +125,13 @@ def test_codex_discovery_finds_executable_without_system_install(tmp_path: Path)
 
 def test_human_approval_does_not_use_sdk_auto_reviewer() -> None:
     policy, reviewer = user_approval_settings()
+
+    assert policy.root is AskForApprovalValue.on_request
+    assert reviewer is ApprovalsReviewer.user
+
+
+def test_project_auto_mode_keeps_server_requests_for_scope_checks() -> None:
+    policy, reviewer = approval_settings(ProjectApprovalMode.PROJECT_AUTO)
 
     assert policy.root is AskForApprovalValue.on_request
     assert reviewer is ApprovalsReviewer.user

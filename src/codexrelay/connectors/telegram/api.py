@@ -129,6 +129,32 @@ class TelegramClient:
             message_ids.append(str(result["message_id"]))
         return message_ids
 
+    async def edit_text(self, chat_id: str, message_id: str, text: str) -> None:
+        """Replace the text of one bot-authored message."""
+        result = await self._call(
+            "editMessageText",
+            {"chat_id": chat_id, "message_id": int(message_id), "text": text},
+        )
+        if not isinstance(result, dict):
+            raise TelegramAPIError(
+                "editMessageText returned an invalid object",
+                error_code=None,
+                retry_after=None,
+            )
+
+    async def delete_message(self, chat_id: str, message_id: str) -> None:
+        """Delete one bot-authored message after a task finishes."""
+        result = await self._call(
+            "deleteMessage",
+            {"chat_id": chat_id, "message_id": int(message_id)},
+        )
+        if result is not True:
+            raise TelegramAPIError(
+                "deleteMessage returned an invalid result",
+                error_code=None,
+                retry_after=None,
+            )
+
     async def answer_callback_query(self, callback_query_id: str, text: str) -> None:
         await self._call(
             "answerCallbackQuery",

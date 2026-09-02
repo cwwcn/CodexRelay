@@ -16,7 +16,7 @@ CodexRelay is a macOS menu bar app that connects Telegram with a local Codex run
 
 English | [简体中文](README.zh-CN.md) | [Documentation](docs/)
 
-> **Current release:** `v0.1.0`
+> **Current release:** `v0.1.1`
 >
 > This release targets Apple Silicon and Intel Macs. The distributed app is ad-hoc signed and is not yet Apple-notarized; the first-launch instructions below explain the one-time macOS security confirmation.
 
@@ -34,6 +34,7 @@ Send a task to your Telegram bot and let your own Mac run Codex in a project you
 - One active task globally in the first release; project switching is blocked while a task is running;
 - Durable persistence for Codex threads/turns, Telegram inbox/outbox, and task state;
 - One-time Telegram approval for dangerous commands, file changes, and extra permissions;
+- Optional per-project “auto-allow within this project” approval mode, protected by explicit confirmation;
 - Menu bar overview panel, settings window, task stop action, and quit confirmation;
 - Telegram Bot Token stored in CodexRelay's private app-data file with user-only permissions;
 - Optional sleep prevention while a task is running;
@@ -44,7 +45,9 @@ Send a task to your Telegram bot and let your own Mac run Codex in a project you
 - The Bot Token is never written to TOML, SQLite, environment variables, command-line arguments, or logs;
 - Telegram access is unavailable until pairing is complete;
 - Telegram cannot add arbitrary local directories;
+- **Scan Projects** synchronizes the active list with the current scan result: projects inside the configured scan roots that are no longer found (including moved or renamed projects) are hidden, while projects manually registered outside those roots are left untouched. Database records remain recoverable, and no project files are deleted;
 - Approval buttons are single-use, and both allow and deny decisions are reported explicitly;
+- The default approval mode is **Safe mode**. The optional project auto-allow mode is limited to the current project path, bound to the current paired Telegram identity, and resets after project switching or re-pairing. It never grants access outside the project or bypasses macOS privacy permissions;
 - CodexRelay never modifies your global `~/.codex/config.toml`;
 - GitHub Releases update checking is available; when automatic checks find a release, the menu-bar panel shows a “New version available” action. After the user clicks it, CodexRelay selects the current Mac architecture's DMG, verifies its SHA-256 digest, and opens the installer for manual replacement.
 
@@ -101,6 +104,8 @@ uv run codexrelay-gui
 
 The token is stored only in CodexRelay's private app-data file, never in a project configuration file.
 
+When a project is added, CodexRelay performs a minimal access preflight immediately. If the project is inside a protected folder such as Documents, macOS may ask for permission at this setup stage; complete it before running Telegram tasks.
+
 > Upgrading from an older development build: to avoid recurring macOS Keychain authorization prompts, current builds no longer read the legacy Keychain entry. Enter the Bot Token once again on the Telegram page after upgrading.
 
 ## Telegram commands
@@ -115,8 +120,11 @@ The token is stored only in CodexRelay's private app-data file, never in a proje
 /model 2
 /reasoning high
 /status
+/security
 /stop
 ```
+
+`/security` shows the current project's approval mode. Safe mode asks for each elevated operation in Telegram. “Auto-allow within this project” requires a second confirmation and only accepts operations that remain inside the current project directory; network and out-of-project requests still cannot be silently approved. It is disabled again after switching projects or pairing a different Telegram account. This setting is stored in CodexRelay's local database and does not modify `~/.codex/config.toml`.
 
 Project switching is allowed only after the current task finishes. To switch immediately, send `/stop` first, then `/use`. Switching projects does not clear the previous project's conversation.
 

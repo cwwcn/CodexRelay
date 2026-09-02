@@ -25,6 +25,11 @@ class MessageRole(StrEnum):
     SYSTEM = "system"
 
 
+class ProjectApprovalMode(StrEnum):
+    SAFE = "safe"
+    PROJECT_AUTO = "project_auto"
+
+
 @dataclass(frozen=True, slots=True)
 class Project:
     id: str

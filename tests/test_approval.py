@@ -12,6 +12,7 @@ from codexrelay.approval import (
     ApprovalCoordinator,
 )
 from codexrelay.database import Database
+from codexrelay.models import ProjectApprovalMode
 from codexrelay.pairing import PairingService
 
 
@@ -93,3 +94,98 @@ def test_permission_response_is_limited_to_requested_turn_permissions() -> None:
 
     assert accepted == {"permissions": requested, "scope": "turn"}
     assert declined == {"permissions": {}, "scope": "turn"}
+
+
+@pytest.mark.asyncio
+async def test_project_auto_approval_is_bound_to_project_and_pairing_identity(
+    tmp_path: Path,
+) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    async with Database(tmp_path / "state.db") as database:
+        project = await database.add_project(project_path)
+        pairing = PairingService(database)
+        challenge = await pairing.generate()
+        await pairing.pair(
+            code=challenge.code,
+            external_user_id="123",
+            external_conversation_id="123",
+            display_name="Owner",
+        )
+        await database.set_current_project_approval_mode(
+            ProjectApprovalMode.PROJECT_AUTO,
+            connector_type="telegram",
+            account_id="main-bot",
+            external_user_id="123",
+        )
+        assert (
+            await database.project_approval_mode(project.id)
+            is ProjectApprovalMode.PROJECT_AUTO
+        )
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        assert not ApprovalCoordinator._auto_allows(
+            COMMAND_APPROVAL,
+            {"cwd": str(outside), "command": "echo unsafe"},
+            project,
+        )
+
+        challenge = await pairing.generate()
+        await pairing.pair(
+            code=challenge.code,
+            external_user_id="456",
+            external_conversation_id="456",
+            display_name="New owner",
+        )
+        assert await database.project_approval_mode(project.id) is ProjectApprovalMode.SAFE
+
+
+@pytest.mark.asyncio
+async def test_project_auto_approval_accepts_in_scope_request_without_telegram_prompt(
+    tmp_path: Path,
+) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    async with Database(tmp_path / "state.db") as database:
+        project = await database.add_project(project_path)
+        pairing = PairingService(database)
+        challenge = await pairing.generate()
+        await pairing.pair(
+            code=challenge.code,
+            external_user_id="123",
+            external_conversation_id="123",
+            display_name="Owner",
+        )
+        await database.set_current_project_approval_mode(
+            ProjectApprovalMode.PROJECT_AUTO,
+            connector_type="telegram",
+            account_id="main-bot",
+            external_user_id="123",
+        )
+        job_id, _message = await database.create_queued_job_with_input(
+            conversation_id=(await database.get_or_create_active_conversation(project.id)).id,
+            text="run tests",
+        )
+        await database.mark_job_starting(job_id)
+        await database.mark_turn_started(job_id, "thread-1", "turn-1")
+        coordinator = ApprovalCoordinator(
+            database=database,
+            loop=asyncio.get_running_loop(),
+            timeout_seconds=1,
+        )
+
+        decision = await coordinator.request(
+            COMMAND_APPROVAL,
+            {
+                "turnId": "turn-1",
+                "itemId": "item-1",
+                "command": "pytest -q",
+                "cwd": str(project_path),
+            },
+        )
+
+        assert decision == "accept"
+        assert not await database.pending_outbound_messages(
+            connector_type="telegram", account_id="main-bot"
+        )

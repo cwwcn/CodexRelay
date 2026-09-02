@@ -5,6 +5,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from codexrelay.models import ProjectApprovalMode
+
+ProgressCallback = Callable[[str], Awaitable[None]]
+
 
 @dataclass(frozen=True, slots=True)
 class TurnResult:
@@ -27,7 +31,9 @@ class CodexBackend(Protocol):
         thread_id: str | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        approval_mode: ProjectApprovalMode = ProjectApprovalMode.SAFE,
         on_turn_started: Callable[[str, str], Awaitable[None]] | None = None,
+        on_progress: ProgressCallback | None = None,
     ) -> TurnResult: ...
 
     async def interrupt(self, turn_id: str) -> None: ...

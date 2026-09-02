@@ -59,6 +59,54 @@ async def test_cannot_switch_project_while_a_job_is_running(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_scan_maintenance_hides_missing_registered_projects(tmp_path: Path) -> None:
+    existing = tmp_path / "existing"
+    missing = tmp_path / "missing"
+    existing.mkdir()
+    missing.mkdir()
+    async with Database(tmp_path / "state.db") as database:
+        await database.add_project(existing, "Existing")
+        await database.add_project(missing, "Missing")
+        missing.rmdir()
+
+        assert await database.disable_missing_projects() == 1
+        projects = await database.list_projects()
+        assert [project.name for project in projects] == ["Existing"]
+
+        cursor = await database.connection.execute(
+            "SELECT enabled FROM projects WHERE name='Missing'"
+        )
+        row = await cursor.fetchone()
+        assert row is not None and row["enabled"] == 0
+
+
+@pytest.mark.asyncio
+async def test_reconcile_scan_removes_stale_projects_inside_roots(tmp_path: Path) -> None:
+    root = tmp_path / "projects"
+    root.mkdir()
+    current = root / "current"
+    stale = root / "stale"
+    outside = tmp_path / "outside"
+    for project in (current, stale, outside):
+        project.mkdir()
+        (project / "pyproject.toml").touch()
+
+    async with Database(tmp_path / "state.db") as database:
+        await database.add_project(stale, "Stale")
+        await database.add_project(outside, "Outside")
+        removed = await database.reconcile_projects({current.resolve()}, (root,))
+
+        assert removed == 1
+        active = await database.list_projects()
+        assert [project.name for project in active] == ["Outside"]
+        cursor = await database.connection.execute(
+            "SELECT enabled FROM projects WHERE name='Stale'"
+        )
+        row = await cursor.fetchone()
+        assert row is not None and row["enabled"] == 0
+
+
+@pytest.mark.asyncio
 async def test_discover_projects_is_bounded(tmp_path: Path) -> None:
     python_project = tmp_path / "python-project"
     nested_project = tmp_path / "group" / "nested-project"

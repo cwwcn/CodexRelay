@@ -131,6 +131,35 @@ async def test_set_my_commands_publishes_private_chat_menu() -> None:
     ]
 
 
+@pytest.mark.asyncio
+async def test_client_edits_and_deletes_progress_message() -> None:
+    requests: list[tuple[str, dict[str, object]]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert isinstance(body, dict)
+        requests.append((request.url.path.rsplit("/", 1)[-1], body))
+        if request.url.path.endswith("deleteMessage"):
+            return httpx.Response(200, request=request, json={"ok": True, "result": True})
+        if request.url.path.endswith("editMessageText"):
+            return httpx.Response(
+                200,
+                request=request,
+                json={"ok": True, "result": {"message_id": 9}},
+            )
+        raise AssertionError(f"unexpected method: {request.url.path}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = TelegramClient("123:secret-token", client=http_client)
+        await client.edit_text("42", "9", "⏳ 正在处理你的请求…")
+        await client.delete_message("42", "9")
+
+    assert requests == [
+        ("editMessageText", {"chat_id": "42", "message_id": 9, "text": "⏳ 正在处理你的请求…"}),
+        ("deleteMessage", {"chat_id": "42", "message_id": 9}),
+    ]
+
+
 def test_telegram_command_registry_drives_help_text() -> None:
     commands = bot_api_commands()
 
@@ -143,9 +172,10 @@ def test_telegram_command_registry_drives_help_text() -> None:
         "new",
         "models",
         "model",
-        "reasoning",
-        "status",
-        "stop",
+            "reasoning",
+            "status",
+            "security",
+            "stop",
     ]
     assert "/use 切换当前项目：/use <编号或名称>" in help_text()
 

@@ -4,6 +4,24 @@
 
 Changes will be recorded here. / 后续变更将在这里记录。
 
+## 0.1.1 - 2026-09-02
+
+Maintenance release focused on stability, project discovery, approvals, and Telegram task feedback. / 聚焦稳定性、项目扫描、审批和 Telegram 任务反馈的维护版本。
+
+- Added Telegram task progress updates and clearer approval outcomes;
+- Reconciled scanned projects with the current filesystem while preserving recoverable database records;
+- Added project-access preflight checks before startup and task execution;
+- Hardened Codex thread/task persistence and recovery behavior;
+- Improved pairing, project status, and menu-bar error feedback;
+- Expanded regression coverage to 91 tests.
+
+- 增加 Telegram 任务进度更新，并明确反馈审批结果；
+- 项目扫描与当前文件系统同步，同时保留可恢复的数据库记录；
+- 在应用启动和任务执行前增加项目访问预检；
+- 加强 Codex thread/任务持久化与恢复行为；
+- 改进配对、项目状态和菜单栏错误提示；
+- 回归测试扩展至 91 项。
+
 ## 0.1.0 - 2026-09-01
 
 First public Alpha release. / 首个公开 Alpha 版本。

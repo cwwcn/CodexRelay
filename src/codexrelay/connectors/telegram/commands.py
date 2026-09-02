@@ -35,6 +35,7 @@ TELEGRAM_COMMANDS: tuple[TelegramCommand, ...] = (
     TelegramCommand("model", "选择当前会话模型", "选择模型：/model <编号或名称>"),
     TelegramCommand("reasoning", "设置推理强度", "设置推理强度：/reasoning <强度>"),
     TelegramCommand("status", "查看当前状态", "查看当前状态"),
+    TelegramCommand("security", "设置项目审批模式", "设置项目审批模式"),
     TelegramCommand("stop", "停止当前任务", "停止当前任务"),
 )
 

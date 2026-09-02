@@ -8,6 +8,7 @@ import pytest
 from codexrelay.codex.base import TurnResult
 from codexrelay.core import DeliveryTarget, RelayService
 from codexrelay.database import Database
+from codexrelay.models import ProjectApprovalMode
 
 
 class FakeBackend:
@@ -16,6 +17,7 @@ class FakeBackend:
         self.final_text = final_text
         self.model: str | None = None
         self.reasoning_effort: str | None = None
+        self.approval_mode = ProjectApprovalMode.SAFE
 
     async def start(self) -> None:
         return None
@@ -32,6 +34,7 @@ class FakeBackend:
         thread_id: str | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        approval_mode: ProjectApprovalMode = ProjectApprovalMode.SAFE,
         on_turn_started: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> TurnResult:
         assert project.is_dir()
@@ -40,6 +43,7 @@ class FakeBackend:
         assert thread_id is None
         self.model = model
         self.reasoning_effort = reasoning_effort
+        self.approval_mode = approval_mode
         if on_turn_started is not None:
             await on_turn_started("thread-1", "turn-1")
         return TurnResult(
@@ -198,6 +202,45 @@ async def test_relay_passes_private_conversation_model_settings_to_codex(
 
         assert backend.model == "gpt-5.6-terra"
         assert backend.reasoning_effort == "high"
+
+
+@pytest.mark.asyncio
+async def test_relay_passes_project_auto_approval_mode_to_codex(tmp_path: Path) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    async with Database(tmp_path / "state.db") as database:
+        await database.add_project(project_path)
+        await database.connection.execute(
+            """
+            INSERT INTO local_users(id, display_name, enabled, created_at)
+            VALUES ('user-1', 'Owner', 1, 'now')
+            """
+        )
+        await database.connection.execute(
+            """
+            INSERT INTO external_identities(
+                id, local_user_id, connector_type, account_id,
+                external_user_id, external_conversation_id, paired_at, enabled
+            ) VALUES ('identity-1', 'user-1', 'telegram', 'main-bot', '123', '123', 'now', 1)
+            """
+        )
+        await database.connection.commit()
+        await database.set_current_project_approval_mode(
+            ProjectApprovalMode.PROJECT_AUTO,
+            connector_type="telegram",
+            account_id="main-bot",
+            external_user_id="123",
+        )
+        backend = FakeBackend()
+        service = RelayService(
+            database=database,
+            backend=backend,
+            sleep_inhibitor=FakeSleepInhibitor(),  # type: ignore[arg-type]
+        )
+
+        await service.run_current_project(text="hello")
+
+        assert backend.approval_mode is ProjectApprovalMode.PROJECT_AUTO
 
 
 @pytest.mark.asyncio

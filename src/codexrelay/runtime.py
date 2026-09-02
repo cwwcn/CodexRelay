@@ -76,6 +76,13 @@ class CodexRelayRuntime:
             await database.expire_pending_approvals()
             await database.interrupt_stale_jobs()
             await database.housekeep()
+            for project in await database.list_projects():
+                try:
+                    ProjectService.preflight_access(project.path)
+                except PermissionError as error:
+                    LOGGER.warning(
+                        "project access preflight failed for %s: %s", project.path, error
+                    )
             await backend.start()
             model_catalog = await backend.model_catalog()
             bot = await telegram.get_me()

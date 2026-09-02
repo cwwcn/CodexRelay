@@ -31,7 +31,29 @@ class ProjectService:
         self.database = database
 
     async def register(self, path: Path, name: str | None = None) -> Project:
-        return await self.database.add_project(path, name)
+        resolved = path.expanduser().resolve(strict=True)
+        self.preflight_access(resolved)
+        return await self.database.add_project(resolved, name)
+
+    @staticmethod
+    def preflight_access(path: Path) -> None:
+        """Trigger a minimal local access check during setup, not mid-task.
+
+        macOS may show a TCC prompt here for protected folders such as Documents.
+        We intentionally do not recurse or modify anything; this only verifies
+        that the registered project directory can be inspected.
+        """
+        resolved = path.expanduser().resolve(strict=True)
+        if not resolved.is_dir():
+            raise ValueError(f"project path is not a directory: {resolved}")
+        try:
+            resolved.stat()
+            next(iter(resolved.iterdir()), None)
+        except (OSError, PermissionError) as error:
+            raise PermissionError(
+                "无法访问项目目录。请在 macOS 的‘系统设置 → 隐私与安全性’中允许 "
+                "CodexRelay 访问该目录。"
+            ) from error
 
     async def list_projects(self) -> list[Project]:
         return await self.database.list_projects()

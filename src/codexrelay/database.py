@@ -19,9 +19,10 @@ from codexrelay.models import (
     MessageRole,
     OutboundMessage,
     Project,
+    ProjectApprovalMode,
 )
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 MIGRATION_1 = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -206,9 +207,28 @@ ALTER TABLE conversations ADD COLUMN model TEXT NULL;
 ALTER TABLE conversations ADD COLUMN reasoning_effort TEXT NULL;
 """
 
+MIGRATION_5 = """
+CREATE TABLE IF NOT EXISTS project_approval_policies (
+    project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+    mode TEXT NOT NULL DEFAULT 'safe' CHECK(mode IN ('safe', 'project_auto')),
+    scope_path TEXT NULL,
+    identity_id TEXT NULL REFERENCES external_identities(id) ON DELETE SET NULL,
+    updated_at TEXT NOT NULL
+);
+"""
+
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds")
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    """Return whether *path* is equal to or below *root*."""
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 class Database:
@@ -316,6 +336,11 @@ class Database:
                 raise
             else:
                 await connection.commit()
+            version = 4
+        if version < 5:
+            await connection.executescript(MIGRATION_5)
+            await connection.execute("INSERT INTO schema_version(version) VALUES (?)", (5,))
+            await connection.commit()
 
     async def add_project(self, path: Path, name: str | None = None) -> Project:
         resolved = path.expanduser().resolve(strict=True)
@@ -369,6 +394,45 @@ class Database:
         )
         return [self._project_from_row(row) for row in await cursor.fetchall()]
 
+    async def disable_missing_projects(self) -> int:
+        """Hide registered projects whose paths no longer exist.
+
+        This explicit maintenance action keeps the database row for recovery;
+        it never removes project files.
+        """
+        projects = await self.list_projects()
+        missing = [project.id for project in projects if not project.path.is_dir()]
+        if not missing:
+            return 0
+        async with self.transaction() as connection:
+            for project_id in missing:
+                await connection.execute(
+                    "UPDATE projects SET enabled=0, updated_at=? WHERE id=?",
+                    (utc_now(), project_id),
+                )
+        return len(missing)
+
+    async def reconcile_projects(self, paths: set[Path], roots: tuple[Path, ...]) -> int:
+        """Make active projects under scan roots match the latest scan result."""
+        projects = await self.list_projects()
+        normalized_paths = {path.expanduser().resolve() for path in paths}
+        normalized_roots = tuple(root.expanduser().resolve() for root in roots)
+        stale: list[str] = []
+        for project in projects:
+            project_path = project.path.resolve()
+            if any(_is_within(project_path, root) for root in normalized_roots):
+                if project_path not in normalized_paths:
+                    stale.append(project.id)
+        if not stale:
+            return 0
+        async with self.transaction() as connection:
+            for project_id in stale:
+                await connection.execute(
+                    "UPDATE projects SET enabled=0, updated_at=? WHERE id=?",
+                    (utc_now(), project_id),
+                )
+        return len(stale)
+
     async def get_project(self, project_id: str) -> Project | None:
         cursor = await self.connection.execute(
             """
@@ -406,6 +470,14 @@ class Database:
                 raise RuntimeError("无法确认当前任务状态")
             if int(row["count"]):
                 raise RuntimeError("任务运行期间不能切换项目，请等待完成或先使用 /stop。")
+            cursor = await connection.execute(
+                "SELECT current_project_id FROM app_state WHERE singleton=1"
+            )
+            state = await cursor.fetchone()
+            if state is None:
+                raise RuntimeError("无法读取当前项目状态")
+            if state["current_project_id"] != project_id:
+                await self.reset_project_approval_policies(connection)
             await connection.execute(
                 "UPDATE app_state SET current_project_id=? WHERE singleton=1", (project_id,)
             )
@@ -413,6 +485,131 @@ class Database:
         if updated is None:
             raise RuntimeError("project disappeared after switch")
         return updated
+
+    async def project_approval_mode(
+        self,
+        project_id: str,
+        *,
+        connector_type: str = "telegram",
+        account_id: str = "main-bot",
+    ) -> ProjectApprovalMode:
+        """Return the effective project policy, failing closed on stale bindings."""
+        cursor = await self.connection.execute(
+            """
+            SELECT p.path, policy.mode, policy.scope_path, policy.identity_id,
+                   enabled_identity.id AS enabled_identity_id
+            FROM projects p
+            LEFT JOIN project_approval_policies policy ON policy.project_id=p.id
+            LEFT JOIN external_identities enabled_identity
+              ON enabled_identity.connector_type=?
+             AND enabled_identity.account_id=?
+             AND enabled_identity.enabled=1
+            WHERE p.id=? AND p.enabled=1
+            """,
+            (connector_type, account_id, project_id),
+        )
+        row = await cursor.fetchone()
+        if row is None or row["mode"] != ProjectApprovalMode.PROJECT_AUTO:
+            return ProjectApprovalMode.SAFE
+        if (
+            row["scope_path"] != row["path"]
+            or row["identity_id"] is None
+            or row["identity_id"] != row["enabled_identity_id"]
+        ):
+            return ProjectApprovalMode.SAFE
+        return ProjectApprovalMode.PROJECT_AUTO
+
+    async def project_for_turn(self, turn_id: str) -> Project | None:
+        cursor = await self.connection.execute(
+            """
+            SELECT p.*, CASE WHEN s.current_project_id=p.id THEN 1 ELSE 0 END AS is_current
+            FROM jobs j
+            JOIN conversations c ON c.id=j.conversation_id
+            JOIN projects p ON p.id=c.project_id
+            CROSS JOIN app_state s
+            WHERE j.codex_turn_id=?
+            LIMIT 1
+            """,
+            (turn_id,),
+        )
+        row = await cursor.fetchone()
+        return None if row is None else self._project_from_row(row)
+
+    async def set_current_project_approval_mode(
+        self,
+        mode: ProjectApprovalMode,
+        *,
+        connector_type: str,
+        account_id: str,
+        external_user_id: str,
+    ) -> Project:
+        """Set a policy only for the current project and currently paired identity."""
+        now = utc_now()
+        async with self.transaction() as connection:
+            cursor = await connection.execute(
+                "SELECT COUNT(*) AS count FROM jobs WHERE status IN (?, ?, ?)",
+                (JobStatus.STARTING, JobStatus.RUNNING, JobStatus.WAITING_APPROVAL),
+            )
+            active = await cursor.fetchone()
+            if active is None:
+                raise RuntimeError("无法确认当前任务状态")
+            if int(active["count"]):
+                raise RuntimeError("任务运行期间不能修改审批模式。")
+            cursor = await connection.execute(
+                """
+                SELECT p.id, p.path
+                FROM projects p JOIN app_state s ON s.current_project_id=p.id
+                WHERE p.enabled=1
+                """
+            )
+            project = await cursor.fetchone()
+            if project is None:
+                raise RuntimeError("当前没有可用项目。")
+            identity_id: str | None = None
+            scope_path: str | None = None
+            if mode is ProjectApprovalMode.PROJECT_AUTO:
+                cursor = await connection.execute(
+                    """
+                    SELECT e.id
+                    FROM external_identities e
+                    JOIN local_users u ON u.id=e.local_user_id
+                    WHERE e.connector_type=? AND e.account_id=? AND e.external_user_id=?
+                      AND e.enabled=1 AND u.enabled=1
+                    """,
+                    (connector_type, account_id, external_user_id),
+                )
+                identity = await cursor.fetchone()
+                if identity is None:
+                    raise RuntimeError("当前 Telegram 账号尚未配对。")
+                identity_id = str(identity["id"])
+                scope_path = str(project["path"])
+            await connection.execute(
+                """
+                INSERT INTO project_approval_policies(
+                    project_id, mode, scope_path, identity_id, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(project_id) DO UPDATE SET
+                    mode=excluded.mode,
+                    scope_path=excluded.scope_path,
+                    identity_id=excluded.identity_id,
+                    updated_at=excluded.updated_at
+                """,
+                (str(project["id"]), mode, scope_path, identity_id, now),
+            )
+        selected = await self.get_project(str(project["id"]))
+        if selected is None:
+            raise RuntimeError("项目在更新审批模式后不可用")
+        return selected
+
+    async def reset_project_approval_policies(self, connection: aiosqlite.Connection) -> None:
+        await connection.execute(
+            """
+            UPDATE project_approval_policies
+            SET mode='safe', scope_path=NULL, identity_id=NULL, updated_at=?
+            WHERE mode!='safe' OR scope_path IS NOT NULL OR identity_id IS NOT NULL
+            """,
+            (utc_now(),),
+        )
 
     async def ingest_event(
         self,

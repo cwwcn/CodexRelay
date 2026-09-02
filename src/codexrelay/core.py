@@ -3,8 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from codexrelay.codex.base import CodexBackend
+from codexrelay.codex.base import CodexBackend, ProgressCallback
 from codexrelay.database import Database
+from codexrelay.projects import ProjectService
 from codexrelay.sleep import SleepInhibitor
 
 
@@ -44,6 +45,7 @@ class RelayService:
         image_paths: tuple[Path, ...] = (),
         inbound_event_id: str | None = None,
         delivery: DeliveryTarget | None = None,
+        on_progress: ProgressCallback | None = None,
     ) -> RelayResult:
         project = await self.database.current_project()
         if project is None:
@@ -54,6 +56,7 @@ class RelayService:
             image_paths=image_paths,
             inbound_event_id=inbound_event_id,
             delivery=delivery,
+            on_progress=on_progress,
         )
 
     async def run_project(
@@ -64,6 +67,7 @@ class RelayService:
         image_paths: tuple[Path, ...] = (),
         inbound_event_id: str | None = None,
         delivery: DeliveryTarget | None = None,
+        on_progress: ProgressCallback | None = None,
     ) -> RelayResult:
         """Run against the explicitly selected project.
 
@@ -73,6 +77,10 @@ class RelayService:
         project = await self.database.get_project(project_id)
         if project is None or not project.enabled:
             raise RuntimeError("the selected project is no longer available")
+        # Fail before creating a job or starting Codex if macOS TCC access has
+        # disappeared. This prevents a permission prompt from interrupting a
+        # remotely initiated task halfway through execution.
+        ProjectService.preflight_access(project.path)
         conversation = await self.database.get_or_create_active_conversation(
             project.id, title=project.name
         )
@@ -86,21 +94,59 @@ class RelayService:
         if execution_conversation is None:
             await self.database.fail_job(job_id, "conversation_disappeared")
             raise RuntimeError("conversation disappeared before Codex execution")
+        project_approval_mode = await self.database.project_approval_mode(project.id)
 
         async def on_turn_started(thread_id: str, turn_id: str) -> None:
             await self.database.mark_turn_started(job_id, thread_id, turn_id)
 
         try:
             async with self.sleep_inhibitor.lease():
-                result = await self.backend.run_turn(
-                    project=project.path,
-                    text=text,
-                    image_paths=image_paths,
-                    thread_id=execution_conversation.codex_thread_id,
-                    model=execution_conversation.model,
-                    reasoning_effort=execution_conversation.reasoning_effort,
-                    on_turn_started=on_turn_started,
-                )
+                if on_progress is None:
+                    if project_approval_mode.value == "safe":
+                        result = await self.backend.run_turn(
+                            project=project.path,
+                            text=text,
+                            image_paths=image_paths,
+                            thread_id=execution_conversation.codex_thread_id,
+                            model=execution_conversation.model,
+                            reasoning_effort=execution_conversation.reasoning_effort,
+                            on_turn_started=on_turn_started,
+                        )
+                    else:
+                        result = await self.backend.run_turn(
+                            project=project.path,
+                            text=text,
+                            image_paths=image_paths,
+                            thread_id=execution_conversation.codex_thread_id,
+                            model=execution_conversation.model,
+                            reasoning_effort=execution_conversation.reasoning_effort,
+                            approval_mode=project_approval_mode,
+                            on_turn_started=on_turn_started,
+                        )
+                else:
+                    if project_approval_mode.value == "safe":
+                        result = await self.backend.run_turn(
+                            project=project.path,
+                            text=text,
+                            image_paths=image_paths,
+                            thread_id=execution_conversation.codex_thread_id,
+                            model=execution_conversation.model,
+                            reasoning_effort=execution_conversation.reasoning_effort,
+                            on_turn_started=on_turn_started,
+                            on_progress=on_progress,
+                        )
+                    else:
+                        result = await self.backend.run_turn(
+                            project=project.path,
+                            text=text,
+                            image_paths=image_paths,
+                            thread_id=execution_conversation.codex_thread_id,
+                            model=execution_conversation.model,
+                            reasoning_effort=execution_conversation.reasoning_effort,
+                            approval_mode=project_approval_mode,
+                            on_turn_started=on_turn_started,
+                            on_progress=on_progress,
+                        )
             final_text = result.final_text if result.final_text.strip() else "任务已完成。"
             canonical_message_id = await self.database.complete_job(job_id, final_text)
             outbound_id = None

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import re
+import secrets
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -14,9 +16,10 @@ from codexrelay.codex.model_catalog import (
 from codexrelay.connectors.base import IncomingMessage
 from codexrelay.connectors.telegram.api import TelegramClient
 from codexrelay.connectors.telegram.commands import help_text
+from codexrelay.connectors.telegram.progress import TelegramProgress
 from codexrelay.core import DeliveryTarget, RelayService
 from codexrelay.database import Database
-from codexrelay.models import Conversation, JobStatus, Project
+from codexrelay.models import Conversation, JobStatus, Project, ProjectApprovalMode
 from codexrelay.pairing import PairingError, PairingService
 from codexrelay.projects import ProjectService
 
@@ -53,6 +56,7 @@ class TelegramRouter:
         self.approval_resolver = approval_resolver
         self.model_catalog = model_catalog
         self._job_lock = asyncio.Lock()
+        self._security_confirmations: dict[str, tuple[str, str, str, datetime]] = {}
 
     async def handle(self, event_id: str, message: IncomingMessage) -> None:
         authorized = await self.database.is_authorized_identity(
@@ -61,6 +65,11 @@ class TelegramRouter:
             external_user_id=message.external_user_id,
         )
         if message.callback_data is not None:
+            if authorized and message.callback_data.startswith("security:"):
+                if message.callback_query_id is not None:
+                    await self.client.answer_callback_query(message.callback_query_id, "已收到")
+                await self._handle_security_callback(message)
+                return
             decision: Literal["accept", "decline"] | None = None
             if authorized and self.approval_resolver is not None:
                 decision = await self.approval_resolver.resolve_callback(message.callback_data)
@@ -91,6 +100,7 @@ class TelegramRouter:
             except PairingError as error:
                 await self._reply(message, f"配对失败：{error}")
                 return
+            self._security_confirmations.clear()
             await self._reply(message, "配对成功。发送 /projects 查看可用项目。")
             return
 
@@ -133,6 +143,7 @@ class TelegramRouter:
                 message,
                 f"已切换到：{selected.name}\n{selected.path}",
             )
+            self._security_confirmations.clear()
             return
         if command == "/new":
             if await self.database.active_job_count():
@@ -256,6 +267,18 @@ class TelegramRouter:
             name = project.name if project is not None else "未选择"
             running_project = await self.database.active_job_project()
             running_name = running_project.name if running_project is not None else "无"
+            approval_status = "审批模式：未选择项目"
+            if project is not None:
+                approval_mode = await self.database.project_approval_mode(
+                    project.id,
+                    connector_type=message.connector_type,
+                    account_id=message.account_id,
+                )
+                approval_status = (
+                    "审批模式：本项目内自动允许"
+                    if approval_mode is ProjectApprovalMode.PROJECT_AUTO
+                    else "审批模式：安全模式"
+                )
             model_status = "模型：尚未就绪"
             state = await self._current_model_state()
             if state is not None:
@@ -266,9 +289,13 @@ class TelegramRouter:
                 )
             await self._reply(
                 message,
-                f"当前项目：{name}\n{model_status}\n运行中任务：{active_jobs}\n"
+                f"当前项目：{name}\n{model_status}\n{approval_status}\n"
+                f"运行中任务：{active_jobs}\n"
                 f"任务所属项目：{running_name}",
             )
+            return
+        if command in {"/security", "/approval"}:
+            await self._handle_security_command(message)
             return
         if command == "/stop":
             running_project = await self.database.active_job_project()
@@ -303,6 +330,8 @@ class TelegramRouter:
                 await self._reply(message, "当前没有可用项目。请先在Mac端添加项目。")
                 return
             images = await self._download_images(message)
+            progress = TelegramProgress(self.client, message.external_conversation_id)
+            await progress.start()
             try:
                 await self.relay.run_project(
                     project_id=project.id,
@@ -314,8 +343,16 @@ class TelegramRouter:
                         account_id=message.account_id,
                         external_conversation_id=message.external_conversation_id,
                     ),
+                    on_progress=progress.update if progress.active else None,
+                )
+            except PermissionError:
+                await self._reply(
+                    message,
+                    "当前项目访问权限不可用。请在 Mac 端的‘系统设置 → 隐私与安全性’中允许 "
+                    "CodexRelay 访问该目录后再试。",
                 )
             finally:
+                await progress.finish()
                 for image in images:
                     image.unlink(missing_ok=True)
                 if images:
@@ -365,10 +402,118 @@ class TelegramRouter:
         )
         return project, conversation, option, effort
 
-    async def _reply(self, message: IncomingMessage, text: str) -> None:
+    async def _reply(
+        self,
+        message: IncomingMessage,
+        text: str,
+        *,
+        reply_markup: dict[str, object] | None = None,
+    ) -> None:
         await self.database.queue_text(
             connector_type="telegram",
             account_id=message.account_id,
             external_conversation_id=message.external_conversation_id,
             text=text,
+            reply_markup=reply_markup,
         )
+
+    async def _handle_security_command(self, message: IncomingMessage) -> None:
+        project = await self.database.current_project()
+        if project is None:
+            await self._reply(message, "当前没有可用项目。请先在 Mac 端添加项目。")
+            return
+        mode = await self.database.project_approval_mode(
+            project.id,
+            connector_type=message.connector_type,
+            account_id=message.account_id,
+        )
+        mode_label = (
+            "本项目内自动允许"
+            if mode is ProjectApprovalMode.PROJECT_AUTO
+            else "安全模式"
+        )
+        await self._reply(
+            message,
+            f"当前项目：{project.name}\n当前审批模式：{mode_label}\n\n"
+            "安全模式会在需要时通过 Telegram 逐项请求确认。\n"
+            "本项目内自动允许只对当前项目目录生效，但会降低安全性。",
+            reply_markup={
+                "inline_keyboard": [
+                    [
+                        {"text": "安全模式", "callback_data": "security:safe"},
+                        {"text": "本项目内自动允许", "callback_data": "security:auto"},
+                    ]
+                ]
+            },
+        )
+
+    async def _handle_security_callback(self, message: IncomingMessage) -> None:
+        data = message.callback_data or ""
+        if data == "security:safe":
+            if self._job_lock.locked():
+                await self._reply(message, "修改失败：任务运行期间不能修改审批模式。")
+                return
+            try:
+                project = await self.database.set_current_project_approval_mode(
+                    ProjectApprovalMode.SAFE,
+                    connector_type="telegram",
+                    account_id=message.account_id,
+                    external_user_id=message.external_user_id,
+                )
+            except RuntimeError as error:
+                await self._reply(message, f"修改失败：{error}")
+                return
+            await self._reply(message, f"已切换为“安全模式”。当前项目：{project.name}")
+            return
+        if data == "security:auto":
+            token = secrets.token_urlsafe(12)
+            self._security_confirmations[token] = (
+                message.connector_type,
+                message.account_id,
+                message.external_user_id,
+                datetime.now(UTC) + timedelta(minutes=5),
+            )
+            await self._reply(
+                message,
+                "开启后，Codex 将自动批准当前项目目录内的文件修改和命令执行，\n"
+                "不再逐项请求确认。\n\n这会降低安全性，确定开启吗？",
+                reply_markup={
+                    "inline_keyboard": [[
+                        {"text": "确认开启", "callback_data": f"security:confirm:{token}"},
+                        {"text": "取消", "callback_data": "security:cancel"},
+                    ]]
+                },
+            )
+            return
+        if data == "security:cancel":
+            await self._reply(message, "已取消，审批模式保持不变。")
+            return
+        if data.startswith("security:confirm:"):
+            token = data.removeprefix("security:confirm:")
+            pending = self._security_confirmations.pop(token, None)
+            if (
+                pending is None
+                or pending[0] != message.connector_type
+                or pending[1] != message.account_id
+                or pending[2] != message.external_user_id
+                or pending[3] <= datetime.now(UTC)
+            ):
+                await self._reply(message, "确认已失效，请重新发送 /security。")
+                return
+            if self._job_lock.locked():
+                await self._reply(message, "修改失败：任务运行期间不能修改审批模式。")
+                return
+            try:
+                project = await self.database.set_current_project_approval_mode(
+                    ProjectApprovalMode.PROJECT_AUTO,
+                    connector_type="telegram",
+                    account_id=message.account_id,
+                    external_user_id=message.external_user_id,
+                )
+            except RuntimeError as error:
+                await self._reply(message, f"修改失败：{error}")
+                return
+            await self._reply(
+                message,
+                f"已开启“本项目内自动允许”。\n仅对当前项目 {project.name} 生效。",
+            )

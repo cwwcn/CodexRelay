@@ -1673,21 +1673,34 @@ class SettingsWindow(QMainWindow):
             async with Database(self.paths.database) as database:
                 return await ProjectService(database).register(Path(selected))
 
-        self._run(add, finished=lambda _value: self._load_projects())
+        def finished(value: object) -> None:
+            self._load_projects()
+            if isinstance(value, Exception):
+                self._show_error(str(value))
+
+        self._run(add, finished=finished)
 
     def _scan_projects(self) -> None:
         async def scan() -> object:
             async with Database(self.paths.database) as database:
                 service = ProjectService(database)
-                roots = [Path(root).expanduser() for root in self.settings.projects.scan_roots]
-                found = service.discover(roots, max_depth=self.settings.projects.scan_depth)
-                for path in found:
+                roots = tuple(Path(root).expanduser() for root in self.settings.projects.scan_roots)
+                found_paths = set(
+                    service.discover(roots, max_depth=self.settings.projects.scan_depth)
+                )
+                disabled = await database.reconcile_projects(found_paths, roots)
+                for path in found_paths:
                     await service.register(path)
-                return len(found)
+                return len(found_paths), disabled
 
         def finished(value: object) -> None:
             self._load_projects()
-            self.overview_message.setText(f"扫描完成，找到并登记 {value} 个项目。")
+            found, disabled = (
+                value if isinstance(value, tuple) and len(value) == 2 else (0, 0)
+            )
+            self.overview_message.setText(
+                f"扫描完成：新增或确认 {found} 个项目，隐藏 {disabled} 个失效路径。"
+            )
 
         self._run(scan, finished=finished)
 
@@ -1756,7 +1769,13 @@ class SettingsWindow(QMainWindow):
             self.telegram_status.set_state("warning", "连接失败")
         if "Codex CLI was not found" in message:
             self.codex_status.set_state("warning", "未找到本机 Codex CLI")
-        self.overview_message.setText(message)
+        # Do not expose a stale raw traceback in the compact menu-bar panel.
+        # A project may have been moved since the last launch; the scanner can
+        # reconcile it, while the panel should show an actionable status.
+        if "FileNotFoundError" in message or "No such file or directory" in message:
+            self.overview_message.setText("当前项目路径不可用，请扫描项目或重新选择项目。")
+        else:
+            self.overview_message.setText(message)
 
     def _refresh_overview(self) -> None:
         telegram = self.telegram_status.detail.text()

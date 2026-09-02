@@ -157,6 +157,7 @@ class PairingService:
                     "UPDATE pairing_codes SET consumed_at=? WHERE id=?",
                     (paired_at, challenge["id"]),
                 )
+                await self.database.reset_project_approval_policies(connection)
         if failure is not None:
             raise PairingError(failure)
         if local_user_id is None:

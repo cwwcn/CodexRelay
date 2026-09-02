@@ -316,7 +316,7 @@ async def test_schema_v3_migrates_model_settings_without_losing_conversations(
         conversation = await database.conversation("conversation-1")
 
         assert {"model", "reasoning_effort"} <= columns
-        assert version is not None and version["version"] == 4
+        assert version is not None and version["version"] == 5
         assert conversation is not None
         assert conversation.codex_thread_id == "thread-1"
         assert conversation.model is None

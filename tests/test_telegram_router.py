@@ -12,6 +12,7 @@ from codexrelay.connectors.telegram.api import TelegramClient
 from codexrelay.connectors.telegram.router import TelegramRouter
 from codexrelay.core import RelayService
 from codexrelay.database import Database
+from codexrelay.models import ProjectApprovalMode
 from codexrelay.pairing import PairingService
 from codexrelay.projects import ProjectService
 
@@ -282,6 +283,74 @@ async def test_router_selects_model_and_reasoning_for_current_project_conversati
         assert "既有上下文保持不变" in replies[1]
         assert "xhigh" in replies[2]
         assert "模型：GPT Deep (gpt-deep)" in replies[3]
+
+
+@pytest.mark.asyncio
+async def test_security_command_requires_confirmation_and_sets_project_mode(
+    tmp_path: Path,
+) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    async with Database(tmp_path / "state.db") as database:
+        project = await database.add_project(project_path, "Relay")
+        await authorize(database)
+        client = CallbackTelegramClient()
+        router = TelegramRouter(
+            database=database,
+            client=cast(TelegramClient, client),
+            relay=cast(RelayService, UnusedRelay()),
+            pairing=PairingService(database),
+            project_service=ProjectService(database),
+            temporary_directory=tmp_path / "temp",
+        )
+
+        await router.handle("event-security", message("/security"))
+        pending = await database.pending_outbound_messages(
+            connector_type="telegram", account_id="main-bot"
+        )
+        assert "安全模式" in pending[-1].payload_json
+
+        auto_callback = IncomingMessage(
+            connector_type="telegram",
+            account_id="main-bot",
+            external_event_id="security-auto",
+            external_user_id="123",
+            external_conversation_id="123",
+            sender_display_name="Owner",
+            text="",
+            callback_data="security:auto",
+            callback_query_id="callback-auto",
+        )
+        await router.handle("event-security-auto", auto_callback)
+        pending = await database.pending_outbound_messages(
+            connector_type="telegram", account_id="main-bot"
+        )
+        confirmation = pending[-1].payload_json
+        marker = "security:confirm:"
+        start = confirmation.index(marker)
+        token = confirmation[start:].split('"', 1)[0]
+
+        confirm_callback = IncomingMessage(
+            connector_type="telegram",
+            account_id="main-bot",
+            external_event_id="security-confirm",
+            external_user_id="123",
+            external_conversation_id="123",
+            sender_display_name="Owner",
+            text="",
+            callback_data=token,
+            callback_query_id="callback-confirm",
+        )
+        await router.handle("event-security-confirm", confirm_callback)
+
+        assert (
+            await database.project_approval_mode(project.id)
+            is ProjectApprovalMode.PROJECT_AUTO
+        )
+        assert client.answers == [
+            ("callback-auto", "已收到"),
+            ("callback-confirm", "已收到"),
+        ]
 
 
 @pytest.mark.asyncio
