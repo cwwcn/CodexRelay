@@ -270,7 +270,18 @@ class Database:
     async def transaction(self) -> AsyncIterator[aiosqlite.Connection]:
         async with self._transaction_lock:
             connection = self.connection
-            await connection.execute("BEGIN IMMEDIATE")
+            # The runtime and short-lived UI workers can open separate SQLite
+            # connections during startup. WAL helps readers, but writers still
+            # serialize; retry briefly instead of surfacing a transient lock
+            # error to the user.
+            for attempt in range(6):
+                try:
+                    await connection.execute("BEGIN IMMEDIATE")
+                    break
+                except aiosqlite.OperationalError as error:
+                    if "locked" not in str(error).casefold() or attempt == 5:
+                        raise
+                    await asyncio.sleep(0.05 * (attempt + 1))
             try:
                 yield connection
             except BaseException:

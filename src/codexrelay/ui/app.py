@@ -1784,6 +1784,8 @@ class SettingsWindow(QMainWindow):
 
     def _show_error(self, message: str) -> None:
         self.save_token_button.setEnabled(True)
+        if "database is locked" in message.casefold():
+            message = "本地数据正在初始化，请稍后再试。"
         QMessageBox.critical(self, "CodexRelay", message)
 
     def closeEvent(self, event: Any) -> None:
