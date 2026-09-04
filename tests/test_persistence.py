@@ -410,3 +410,38 @@ async def test_schema_v6_migration_backfills_current_conversation(tmp_path: Path
     async with Database(database_path) as database:
         current = await database.current_conversation("p")
         assert current is not None and current.id == "c"
+
+
+@pytest.mark.asyncio
+async def test_partial_schema_v6_migration_is_resumed_without_duplicate_column_error(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "partial.db"
+    raw = sqlite3.connect(database_path)
+    try:
+        raw.executescript(MIGRATION_1)
+        raw.executescript(MIGRATION_2)
+        raw.executescript(MIGRATION_3)
+        raw.execute("ALTER TABLE conversations ADD COLUMN model TEXT NULL")
+        raw.execute("ALTER TABLE conversations ADD COLUMN reasoning_effort TEXT NULL")
+        raw.executescript(MIGRATION_5)
+        # Simulate an app that added the first v6 column but crashed before
+        # recording schema version 6.
+        raw.execute("ALTER TABLE conversations ADD COLUMN scope TEXT NOT NULL DEFAULT 'project'")
+        raw.execute("DELETE FROM schema_version")
+        raw.execute("INSERT INTO schema_version(version) VALUES (5)")
+        raw.commit()
+    finally:
+        raw.close()
+
+    async with Database(database_path) as database:
+        cursor = await database.connection.execute("PRAGMA table_info(conversations)")
+        columns = {str(row["name"]) for row in await cursor.fetchall()}
+        assert {
+            "scope",
+            "source",
+            "last_used_at",
+            "is_pinned",
+            "archived_at",
+            "lock_owner",
+        } <= columns

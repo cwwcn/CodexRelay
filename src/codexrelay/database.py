@@ -367,7 +367,22 @@ class Database:
             await connection.commit()
             version = 5
         if version < 6:
-            await connection.executescript(MIGRATION_6)
+            # A partially-applied migration can leave some columns present
+            # while the schema version is still 5. Resume it safely.
+            for column, definition in (
+                ("scope", "TEXT NOT NULL DEFAULT 'project'"),
+                ("source", "TEXT NOT NULL DEFAULT 'telegram'"),
+                ("last_used_at", "TEXT NOT NULL DEFAULT ''"),
+                ("is_pinned", "INTEGER NOT NULL DEFAULT 0"),
+                ("archived_at", "TEXT NULL"),
+                ("lock_owner", "TEXT NULL"),
+            ):
+                cursor = await connection.execute("PRAGMA table_info(conversations)")
+                columns = {str(item[1]) for item in await cursor.fetchall()}
+                if column not in columns:
+                    await connection.execute(
+                        f"ALTER TABLE conversations ADD COLUMN {column} {definition}"
+                    )
             await connection.execute(
                 "UPDATE conversations SET last_used_at=updated_at WHERE last_used_at=''"
             )
