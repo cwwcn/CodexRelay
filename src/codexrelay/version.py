@@ -5,7 +5,7 @@ import plistlib
 import sys
 from pathlib import Path
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 
 def _bundle_build_time() -> str | None:
