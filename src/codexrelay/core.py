@@ -84,6 +84,14 @@ class RelayService:
         conversation = await self.database.get_or_create_active_conversation(
             project.id, title=project.name
         )
+        preflight_thread = getattr(self.backend, "preflight_thread", None)
+        if conversation.codex_thread_id is not None and callable(preflight_thread):
+            await preflight_thread(
+                project=project.path,
+                thread_id=conversation.codex_thread_id,
+                model=conversation.model,
+                approval_mode=await self.database.project_approval_mode(project.id),
+            )
         job_id, _message = await self.database.create_queued_job_with_input(
             conversation_id=conversation.id,
             text=text if text.strip() else "[Image input]",
@@ -94,6 +102,17 @@ class RelayService:
         if execution_conversation is None:
             await self.database.fail_job(job_id, "conversation_disappeared")
             raise RuntimeError("conversation disappeared before Codex execution")
+        owner = delivery.connector_type if delivery is not None else "local"
+        # A conversation selected from Telegram may already have a persistent
+        # lease. Keep that lease after the turn so `/release` remains the
+        # explicit hand-off point to the desktop client. Newly acquired leases
+        # are transient and are released when this turn finishes.
+        persistent_lock = execution_conversation.lock_owner == owner
+        try:
+            await self.database.acquire_conversation_lock(conversation.id, owner)
+        except BaseException as error:
+            await self.database.fail_job(job_id, type(error).__name__)
+            raise
         project_approval_mode = await self.database.project_approval_mode(project.id)
 
         async def on_turn_started(thread_id: str, turn_id: str) -> None:
@@ -160,6 +179,9 @@ class RelayService:
         except BaseException as error:
             await self.database.fail_job(job_id, type(error).__name__)
             raise
+        finally:
+            if not persistent_lock:
+                await self.database.release_conversation_lock(conversation.id, owner)
         return RelayResult(
             job_id=job_id,
             conversation_id=conversation.id,

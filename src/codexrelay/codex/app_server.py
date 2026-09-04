@@ -27,14 +27,16 @@ from openai_codex.generated.v2_all import (
     ReasoningEffort,
     ReasoningSummaryTextDeltaNotification,
     SandboxMode,
+    SortDirection,
     ThreadResumeParams,
+    ThreadSortKey,
     ThreadStartParams,
     TurnPlanUpdatedNotification,
     TurnStartedNotification,
 )
 from openai_codex.models import Notification
 
-from codexrelay.codex.base import ProgressCallback, TurnResult
+from codexrelay.codex.base import DesktopThread, ProgressCallback, TurnResult
 from codexrelay.codex.model_catalog import CodexModelCatalog, CodexModelOption
 from codexrelay.models import ProjectApprovalMode
 
@@ -271,11 +273,91 @@ class AppServerBackend:
             final_text=result.final_response,
         )
 
+    async def preflight_thread(
+        self,
+        *,
+        project: Path,
+        thread_id: str,
+        model: str | None = None,
+        approval_mode: ProjectApprovalMode = ProjectApprovalMode.SAFE,
+    ) -> None:
+        """Check that a thread can be resumed before creating a relay job.
+
+        Resuming a thread briefly acquires Codex's writer lease. Restarting our
+        client immediately releases that probe lease, leaving the real turn to
+        acquire it only after the preflight succeeds.
+        """
+        client = self._require_client()
+        resolved_project = project.expanduser().resolve(strict=True)
+        if self._uses_user_approval:
+            if not isinstance(client, _ApprovalAsyncCodex):
+                raise RuntimeError("user approval client is not configured")
+            await client.thread_resume_with_user_approval(
+                thread_id,
+                cwd=str(resolved_project),
+                model=model,
+                approval_mode=approval_mode,
+            )
+        else:
+            await client.thread_resume(
+                thread_id,
+                approval_mode=ApprovalMode.deny_all,
+                cwd=str(resolved_project),
+                model=model,
+                sandbox=Sandbox.workspace_write,
+            )
+        await self.stop()
+        await self.start()
+
     async def interrupt(self, turn_id: str) -> None:
         handle = self._active_turns.get(turn_id)
         if handle is None:
             raise ValueError("turn is not active")
         await handle.interrupt()
+
+    async def list_project_threads(self, project: Path) -> list[DesktopThread]:
+        """Discover saved Codex threads whose cwd is exactly this project."""
+        resolved_project = project.expanduser().resolve(strict=True)
+        if not resolved_project.is_dir():
+            raise ValueError("Codex project path is not a directory")
+        response = await self._require_client().thread_list(
+            archived=False,
+            limit=200,
+            sort_key=ThreadSortKey.updated_at,
+            sort_direction=SortDirection.desc,
+        )
+        discovered: list[DesktopThread] = []
+        seen_thread_ids: set[str] = set()
+        for thread in response.data:
+            if thread.id in seen_thread_ids:
+                continue
+            seen_thread_ids.add(thread.id)
+            title = (thread.name or "").strip() or (thread.preview or "").strip()
+            if not title:
+                title = "未命名会话"
+            raw_cwd = getattr(thread.cwd, "root", thread.cwd)
+            cwd_matches = Path(str(raw_cwd)).expanduser().resolve() == resolved_project
+            if not cwd_matches and project.name.casefold() not in title.casefold():
+                continue
+            raw_source = getattr(thread.source, "root", thread.source)
+            source_kind = getattr(raw_source, "value", str(raw_source))
+            source = "desktop" if source_kind in {"cli", "vscode"} else (
+                "telegram" if source_kind == "appServer" else "other"
+            )
+            if source == "desktop" and not cwd_matches:
+                source = "desktop_migrated"
+            discovered.append(
+                DesktopThread(
+                    thread_id=thread.id,
+                    title=title[:120],
+                    cwd=Path(str(raw_cwd)),
+                    updated_at=thread.updated_at,
+                    is_active=getattr(thread.status, "type", "") == "active",
+                    source=source,
+                    cwd_matches_project=cwd_matches,
+                )
+            )
+        return discovered
 
     def _require_client(self) -> AsyncCodex:
         if self._client is None:

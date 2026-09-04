@@ -111,11 +111,21 @@ class AsyncWorker(QRunnable):
             result = asyncio.run(self.factory())
         except Exception as error:
             LOGGER.error("background operation failed: %s: %s", type(error).__name__, error)
-            self.signals.failed.emit(f"{type(error).__name__}: {error}")
+            self._emit_safely(self.signals.failed, f"{type(error).__name__}: {error}")
         else:
-            self.signals.finished.emit(result)
+            self._emit_safely(self.signals.finished, result)
         finally:
-            self.signals.completed.emit(self)
+            self._emit_safely(self.signals.completed, self)
+
+    @staticmethod
+    def _emit_safely(signal: Any, value: object) -> None:
+        try:
+            signal.emit(value)
+        except RuntimeError:
+            # Qt may destroy the signal receiver while a worker is finishing
+            # during application shutdown. The background result is no longer
+            # needed once the event loop is closing.
+            return
 
 
 class ChoiceButton(QPushButton):
@@ -674,13 +684,25 @@ class MenuOverview(QWidget):
 
         config_row = QHBoxLayout()
         config_row.setSpacing(8)
-        session_caption = QLabel("会话配置")
+        session_caption = QLabel("会话")
         session_caption.setObjectName("menuCaption")
-        self.session_value = QLabel("本机默认模型 · 默认")
+        session_caption.setFixedWidth(28)
+        self.session_value = QLabel("未选择会话")
         self.session_value.setObjectName("menuSessionValue")
         config_row.addWidget(session_caption)
         config_row.addWidget(self.session_value, 1)
         context_layout.addLayout(config_row)
+
+        model_row = QHBoxLayout()
+        model_row.setSpacing(8)
+        model_caption = QLabel("模型")
+        model_caption.setObjectName("menuCaption")
+        model_caption.setFixedWidth(28)
+        self.model_value = QLabel("本机默认模型 · 默认推理强度")
+        self.model_value.setObjectName("menuModelValue")
+        model_row.addWidget(model_caption)
+        model_row.addWidget(self.model_value, 1)
+        context_layout.addLayout(model_row)
         layout.addWidget(context_card)
 
         task_card = QFrame()
@@ -740,7 +762,24 @@ class MenuOverview(QWidget):
             else "Telegram 尚未连接"
         )
         self.project.setText(snapshot.current_project or "尚未选择")
-        self.session_value.setText(snapshot.model_title)
+        if snapshot.conversation_title:
+            source = {
+                "telegram": "Telegram 创建",
+                "desktop": "电脑上创建",
+                "desktop_migrated": "电脑端相关会话",
+                "other": "其他连接器创建",
+            }.get(snapshot.conversation_source or "", "未绑定来源")
+            lock = snapshot.conversation_lock_owner
+            lock_label = (
+                None
+                if lock is None
+                else {"telegram": "Telegram", "desktop": "电脑"}.get(lock, lock)
+            )
+            lock_text = f" · {lock_label}占用" if lock_label else " · 空闲"
+            self.session_value.setText(f"{snapshot.conversation_title} · {source}{lock_text}")
+        else:
+            self.session_value.setText("未选择会话")
+        self.model_value.setText(snapshot.model_title)
         self.task.setText(snapshot.task_title)
         if snapshot.active_job_count:
             self.task_detail.setText(
@@ -1763,8 +1802,20 @@ class SettingsWindow(QMainWindow):
         )
 
     def set_runtime_failed(self, message: str) -> None:
+        self.model_catalog = None
+        self.model_scope.setText("连接服务失败，暂时无法读取当前项目配置。")
+        self.model_description.setText("请检查网络或配置后，点击菜单栏中的“重新连接”。")
+        self.model_combo.clear()
+        self.reasoning_combo.clear()
+        self.model_combo.setEnabled(False)
+        self.reasoning_combo.setEnabled(False)
+        self.save_model_button.setEnabled(False)
         if "Token is not configured" in message:
             self.telegram_status.set_state("warning", "需要配置")
+        elif "Bot Token 无效" in message or ("Bot Token" in message and "失效" in message):
+            self.telegram_status.set_state("warning", "Token已失效")
+        elif "TelegramTransportError" in message:
+            self.telegram_status.set_state("warning", "网络不可用")
         else:
             self.telegram_status.set_state("warning", "连接失败")
         if "Codex CLI was not found" in message:
@@ -1772,7 +1823,13 @@ class SettingsWindow(QMainWindow):
         # Do not expose a stale raw traceback in the compact menu-bar panel.
         # A project may have been moved since the last launch; the scanner can
         # reconcile it, while the panel should show an actionable status.
-        if "FileNotFoundError" in message or "No such file or directory" in message:
+        if "Token is not configured" in message:
+            self.overview_message.setText("尚未配置 Telegram Bot Token，请打开设置完成配置。")
+        elif "Bot Token 无效" in message or ("Bot Token" in message and "失效" in message):
+            self.overview_message.setText("Telegram Token 无效或已失效，请在设置中重新填写。")
+        elif "TelegramTransportError" in message:
+            self.overview_message.setText("Telegram 暂时无法连接，请检查网络后点击“重新连接”。")
+        elif "FileNotFoundError" in message or "No such file or directory" in message:
             self.overview_message.setText("当前项目路径不可用，请扫描项目或重新选择项目。")
         else:
             self.overview_message.setText(message)
@@ -1957,7 +2014,7 @@ class TrayApplication(QObject):
                 conversation = (
                     None
                     if current is None
-                    else await database.active_conversation(current.id)
+                    else await database.current_conversation(current.id)
                 )
                 return (
                     current,
@@ -1996,6 +2053,9 @@ class TrayApplication(QObject):
                 active_job_status=active_status,
                 model=None if conversation is None else conversation.model,
                 reasoning_effort=None if conversation is None else conversation.reasoning_effort,
+                conversation_title=None if conversation is None else conversation.title,
+                conversation_source=None if conversation is None else conversation.source,
+                conversation_lock_owner=None if conversation is None else conversation.lock_owner,
             )
             self.overview.set_snapshot(self.snapshot)
             self.window.set_telegram_pairing_state(telegram_paired)
@@ -2075,11 +2135,18 @@ class TrayApplication(QObject):
 
     def _runtime_failed(self, message: str) -> None:
         LOGGER.warning("relay requires attention: %s", message)
+        display_message = message
+        if "Token is not configured" in message:
+            display_message = "尚未配置 Telegram Bot Token，请打开设置完成配置。"
+        elif "Bot Token 无效" in message or ("Bot Token" in message and "失效" in message):
+            display_message = "Telegram Token 无效或已失效，请在设置中重新填写。"
+        elif "TelegramTransportError" in message:
+            display_message = "Telegram 暂时无法连接，请检查网络或 VPN 后点击“重新连接”。"
         if hasattr(self, "snapshot"):
             self.snapshot = replace(
                 self.snapshot,
                 runtime_state=RuntimeState.ATTENTION,
-                last_error=message,
+                last_error=display_message,
             )
         if hasattr(self, "overview"):
             self.overview.set_snapshot(self.snapshot)
@@ -2282,6 +2349,7 @@ QLabel#menuSectionLabel { color: #7A8793; font-size: 10px; font-weight: 700; }
 QLabel#menuCaption { color: #7A8793; font-size: 10px; font-weight: 600; }
 QLabel#menuProjectValue { color: #18202A; font-size: 15px; font-weight: 700; }
 QLabel#menuSessionValue { color: #304252; font-size: 12px; font-weight: 650; }
+QLabel#menuModelValue { color: #526678; font-size: 12px; font-weight: 600; }
 QFrame#menuContextCard { background: rgba(255, 255, 255, 78);
     border: 1px solid rgba(166, 184, 198, 115);
     border-radius: 12px; }

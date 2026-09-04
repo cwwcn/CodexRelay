@@ -110,6 +110,19 @@ async def test_client_handles_retry_after_without_exposing_token() -> None:
 
 
 @pytest.mark.asyncio
+async def test_client_distinguishes_invalid_token_from_transport_failure() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, request=request, json={"ok": False})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = TelegramClient("123:secret-token", client=http_client)
+        with pytest.raises(TelegramAPIError, match="Token 无效或已失效") as raised:
+            await client.get_me()
+
+    assert raised.value.error_code == 401
+
+
+@pytest.mark.asyncio
 async def test_set_my_commands_publishes_private_chat_menu() -> None:
     requests: list[dict[str, object]] = []
 
@@ -170,12 +183,16 @@ def test_telegram_command_registry_drives_help_text() -> None:
         "projects",
         "use",
         "new",
+        "sessions",
+        "session",
         "models",
         "model",
             "reasoning",
             "status",
-            "security",
-            "stop",
+        "security",
+        "stop",
+        "release",
+        "takeover",
     ]
     assert "/use 切换当前项目：/use <编号或名称>" in help_text()
 

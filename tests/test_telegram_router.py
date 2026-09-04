@@ -6,6 +6,7 @@ from typing import Any, Literal, cast
 
 import pytest
 
+from codexrelay.codex.base import DesktopThread
 from codexrelay.codex.model_catalog import CodexModelCatalog, CodexModelOption
 from codexrelay.connectors.base import ImageAttachment, IncomingMessage
 from codexrelay.connectors.telegram.api import TelegramClient
@@ -47,6 +48,15 @@ class UnusedTelegramClient:
 class UnusedRelay:
     async def run_project(self, **_kwargs: Any) -> None:
         raise AssertionError("commands should not run Codex")
+
+
+class DesktopThreadBackend:
+    def __init__(self, threads: list[DesktopThread]) -> None:
+        self.threads = threads
+
+    async def list_project_threads(self, project: Path) -> list[DesktopThread]:
+        del project
+        return list(self.threads)
 
 
 class ImageTelegramClient:
@@ -245,6 +255,131 @@ async def test_router_lists_and_switches_registered_projects(tmp_path: Path) -> 
         assert "Second" in replies[0]
         assert "Second" in replies[1]
         assert "First" in replies[2]
+
+
+@pytest.mark.asyncio
+async def test_sessions_syncs_desktop_threads_idempotently_and_selects_one(
+    tmp_path: Path,
+) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    async with Database(tmp_path / "state.db") as database:
+        project = await database.add_project(project_path, "Relay")
+        await authorize(database)
+        existing = await database.get_or_create_active_conversation(project.id)
+        await database.connection.execute(
+            "UPDATE conversations SET codex_thread_id=?, title=? WHERE id=?",
+            ("desktop-thread-1", "旧的 Telegram 标签", existing.id),
+        )
+        await database.connection.commit()
+        await database.create_conversation(project.id, "尚未生成 Codex Thread")
+        backend = DesktopThreadBackend(
+            [
+                DesktopThread(
+                    thread_id="desktop-thread-1",
+                    title="电脑上的上下文",
+                    cwd=project_path,
+                    updated_at=2,
+                ),
+                DesktopThread(
+                    thread_id="desktop-thread-migrated",
+                    title="Relay 主会话",
+                    cwd=tmp_path / "old-project",
+                    updated_at=1,
+                    source="desktop_migrated",
+                    cwd_matches_project=False,
+                ),
+            ]
+        )
+        router = TelegramRouter(
+            database=database,
+            client=cast(TelegramClient, UnusedTelegramClient()),
+            relay=cast(RelayService, UnusedRelay()),
+            pairing=PairingService(database),
+            project_service=ProjectService(database),
+            temporary_directory=tmp_path / "temp",
+            codex_backend=cast(Any, backend),
+        )
+
+        await router.handle("event-sessions-1", message("/sessions"))
+        await router.handle("event-sessions-2", message("/sessions"))
+        sessions = await database.list_conversations(project.id)
+        assert len(sessions) == 3
+        visible_sessions = [
+            session for session in sessions if session.codex_thread_id is not None
+        ]
+        assert len(visible_sessions) == 2
+        assert {session.codex_thread_id for session in visible_sessions} == {
+            "desktop-thread-1",
+            "desktop-thread-migrated",
+        }
+        migrated = next(
+            session
+            for session in visible_sessions
+            if session.codex_thread_id == "desktop-thread-migrated"
+        )
+        assert migrated.source == "desktop_migrated"
+        cursor = await database.connection.execute(
+            "SELECT payload_json FROM outbound_messages "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1"
+        )
+        reply = await cursor.fetchone()
+        assert reply is not None
+        payload = str(reply["payload_json"])
+        assert "当前项目会话（2）" in payload
+        assert "尚未生成 Codex Thread" not in payload
+        assert "路径已迁移" not in payload
+        assert "电脑端相关会话" in payload
+
+        desktop_index = next(
+            index
+            for index, session in enumerate(visible_sessions, start=1)
+            if session.codex_thread_id == "desktop-thread-1"
+        )
+        await router.handle("event-session", message(f"/session {desktop_index}"))
+        current = await database.current_conversation(project.id)
+        assert current is not None
+        assert current.codex_thread_id == "desktop-thread-1"
+        assert current.lock_owner == "telegram"
+
+
+def test_task_error_message_explains_desktop_writer_conflict() -> None:
+    text = TelegramRouter._task_error_message(
+        RuntimeError("JSON-RPC error -32600: thread abc already has an active writer")
+    )
+    assert "由电脑端 Codex 持有" in text
+    assert "完全退出电脑端 Codex" in text
+    assert "/new" in text
+
+
+@pytest.mark.asyncio
+async def test_release_reopens_codex_connection_for_desktop_handoff(tmp_path: Path) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    released = False
+
+    async def release_connection() -> None:
+        nonlocal released
+        released = True
+
+    async with Database(tmp_path / "state.db") as database:
+        project = await database.add_project(project_path, "Relay")
+        await authorize(database)
+        conversation = await database.get_or_create_active_conversation(project.id)
+        await database.acquire_conversation_lock(conversation.id, "telegram")
+        router = TelegramRouter(
+            database=database,
+            client=cast(TelegramClient, UnusedTelegramClient()),
+            relay=cast(RelayService, UnusedRelay()),
+            pairing=PairingService(database),
+            project_service=ProjectService(database),
+            temporary_directory=tmp_path / "temp",
+            release_codex_connection=release_connection,
+        )
+        await router.handle("event-release", message("/release"))
+        assert released
+        current = await database.current_conversation(project.id)
+        assert current is not None and current.lock_owner is None
 
 
 @pytest.mark.asyncio

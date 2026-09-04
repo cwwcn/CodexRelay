@@ -106,6 +106,30 @@ async def test_sdk_backend_runs_text_and_image_turn(tmp_path: Path) -> None:
     assert fake_client.closed
 
 
+@pytest.mark.asyncio
+async def test_preflight_releases_probe_writer_before_real_turn(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    clients: list[FakeClient] = []
+
+    def factory(config: CodexConfig) -> AsyncCodex:
+        client = FakeClient(config)
+        clients.append(client)
+        return cast(AsyncCodex, client)
+
+    backend = AppServerBackend(codex_bin="/usr/bin/true", client_factory=factory)
+    await backend.start()
+    await backend.preflight_thread(
+        project=project,
+        thread_id="desktop-thread",
+    )
+
+    assert len(clients) == 2
+    assert clients[0].closed
+    assert not clients[1].closed
+    await backend.stop()
+
+
 def test_codex_discovery_includes_common_gui_launch_paths() -> None:
     environment = codex_subprocess_environment()
     entries = environment["PATH"].split(":")

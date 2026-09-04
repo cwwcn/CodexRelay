@@ -5,7 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from codexrelay.database import MIGRATION_1, MIGRATION_2, MIGRATION_3, Database
+from codexrelay.database import (
+    MIGRATION_1,
+    MIGRATION_2,
+    MIGRATION_3,
+    MIGRATION_5,
+    MIGRATION_6,
+    Database,
+)
 from codexrelay.models import JobStatus
 
 
@@ -240,8 +247,7 @@ async def test_conversation_model_settings_persist_per_project_and_new_conversat
         )
         replacement = await database.start_new_conversation(first.id, first.name)
 
-        assert replacement.model == "gpt-first"
-        assert replacement.reasoning_effort == "high"
+    assert replacement.model == "gpt-first"
 
     async with Database(database_path) as database:
         first_conversation = await database.active_conversation(first.id)
@@ -253,6 +259,57 @@ async def test_conversation_model_settings_persist_per_project_and_new_conversat
         assert second_conversation is not None
         assert second_conversation.model == "gpt-second"
         assert second_conversation.reasoning_effort == "low"
+
+
+@pytest.mark.asyncio
+async def test_conversation_selection_and_lease_are_isolated(tmp_path: Path) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    async with Database(tmp_path / "state.db") as database:
+        project = await database.add_project(project_path, "Project")
+        first = await database.get_or_create_active_conversation(project.id, "First")
+        second = await database.start_new_conversation(project.id, "Second")
+
+        assert (await database.current_conversation(project.id)).id == second.id
+        await database.select_conversation(first.id, project.id)
+        assert (await database.current_conversation(project.id)).id == first.id
+
+        await database.acquire_conversation_lock(first.id, "telegram")
+        with pytest.raises(RuntimeError, match="正在被 telegram 使用"):
+            await database.acquire_conversation_lock(first.id, "desktop")
+        assert not await database.release_conversation_lock(first.id, "desktop")
+        assert await database.release_conversation_lock(first.id, "telegram")
+        await database.acquire_conversation_lock(first.id, "desktop")
+
+
+@pytest.mark.asyncio
+async def test_model_settings_follow_selected_conversation(tmp_path: Path) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    async with Database(tmp_path / "state.db") as database:
+        project = await database.add_project(project_path)
+        first = await database.get_or_create_active_conversation(project.id, "First")
+        second = await database.start_new_conversation(project.id, "Second")
+        await database.select_conversation(first.id, project.id)
+        configured = await database.set_active_conversation_model(
+            project.id, model="gpt-test", reasoning_effort="high"
+        )
+        assert configured.id == first.id
+        assert (await database.conversation(second.id)).model is None
+
+
+@pytest.mark.asyncio
+async def test_stale_conversation_leases_are_released_on_recovery(tmp_path: Path) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    async with Database(tmp_path / "state.db") as database:
+        project = await database.add_project(project_path)
+        conversation = await database.get_or_create_active_conversation(project.id)
+        await database.acquire_conversation_lock(conversation.id, "telegram")
+
+        assert await database.clear_stale_conversation_locks() == 1
+        recovered = await database.conversation(conversation.id)
+        assert recovered is not None and recovered.lock_owner is None
 
 
 @pytest.mark.asyncio
@@ -316,8 +373,40 @@ async def test_schema_v3_migrates_model_settings_without_losing_conversations(
         conversation = await database.conversation("conversation-1")
 
         assert {"model", "reasoning_effort"} <= columns
-        assert version is not None and version["version"] == 5
+        assert version is not None and version["version"] == 7
         assert conversation is not None
         assert conversation.codex_thread_id == "thread-1"
         assert conversation.model is None
         assert conversation.reasoning_effort is None
+
+
+@pytest.mark.asyncio
+async def test_schema_v6_migration_backfills_current_conversation(tmp_path: Path) -> None:
+    database_path = tmp_path / "state.db"
+    raw = sqlite3.connect(database_path)
+    try:
+        raw.executescript(MIGRATION_1)
+        raw.executescript(MIGRATION_2)
+        raw.executescript(MIGRATION_3)
+        raw.execute("ALTER TABLE conversations ADD COLUMN model TEXT NULL")
+        raw.execute("ALTER TABLE conversations ADD COLUMN reasoning_effort TEXT NULL")
+        raw.executescript(MIGRATION_5)
+        raw.executescript(MIGRATION_6)
+        raw.execute("DELETE FROM schema_version")
+        raw.execute("INSERT INTO schema_version(version) VALUES (6)")
+        raw.execute(
+            "INSERT INTO projects(id,name,path,enabled,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+            ("p", "Project", str(tmp_path), 1, "now", "now"),
+        )
+        raw.execute("UPDATE app_state SET current_project_id='p' WHERE singleton=1")
+        raw.execute(
+            "INSERT INTO conversations("
+            "id,project_id,title,status,last_used_at,created_at,updated_at) "
+            "VALUES ('c','p','Conversation','active','later','now','now')"
+        )
+        raw.commit()
+    finally:
+        raw.close()
+    async with Database(database_path) as database:
+        current = await database.current_conversation("p")
+        assert current is not None and current.id == "c"

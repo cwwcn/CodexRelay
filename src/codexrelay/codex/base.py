@@ -17,6 +17,19 @@ class TurnResult:
     final_text: str
 
 
+@dataclass(frozen=True, slots=True)
+class DesktopThread:
+    """A Codex thread discovered from the local desktop Codex store."""
+
+    thread_id: str
+    title: str
+    cwd: Path
+    updated_at: int
+    is_active: bool = False
+    source: str = "desktop"
+    cwd_matches_project: bool = True
+
+
 class CodexBackend(Protocol):
     async def start(self) -> None: ...
 
@@ -36,4 +49,15 @@ class CodexBackend(Protocol):
         on_progress: ProgressCallback | None = None,
     ) -> TurnResult: ...
 
+    async def preflight_thread(
+        self,
+        *,
+        project: Path,
+        thread_id: str,
+        model: str | None = None,
+        approval_mode: ProjectApprovalMode = ProjectApprovalMode.SAFE,
+    ) -> None: ...
+
     async def interrupt(self, turn_id: str) -> None: ...
+
+    async def list_project_threads(self, project: Path) -> list[DesktopThread]: ...

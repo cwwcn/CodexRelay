@@ -207,6 +207,19 @@ class TelegramClient:
             response = await self._client.post(url, json=dict(payload or {}))
             response.raise_for_status()
             body = response.json()
+        except httpx.HTTPStatusError as error:
+            # Telegram returns HTTP 401 for revoked or mistyped bot tokens.
+            # Keep this distinct from connection failures so the UI can tell
+            # the user to update credentials instead of blaming the network.
+            if error.response.status_code in {401, 403}:
+                raise TelegramAPIError(
+                    "Telegram Bot Token 无效或已失效，请重新填写 Token",
+                    error_code=error.response.status_code,
+                    retry_after=None,
+                ) from error
+            raise TelegramTransportError(
+                f"Telegram {method} request failed (HTTP {error.response.status_code})"
+            ) from error
         except (httpx.HTTPError, ValueError) as error:
             raise TelegramTransportError(f"Telegram {method} request failed") from error
         if not isinstance(body, dict):

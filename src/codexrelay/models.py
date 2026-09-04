@@ -44,13 +44,19 @@ class Project:
 @dataclass(frozen=True, slots=True)
 class Conversation:
     id: str
-    project_id: str
+    project_id: str | None
     codex_thread_id: str | None
     title: str
     status: str
     last_message_id: str | None
     model: str | None
     reasoning_effort: str | None
+    scope: str
+    source: str
+    last_used_at: str
+    is_pinned: bool
+    archived_at: str | None
+    lock_owner: str | None
 
 
 @dataclass(frozen=True, slots=True)

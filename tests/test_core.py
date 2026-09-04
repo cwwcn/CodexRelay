@@ -54,6 +54,36 @@ class FakeBackend:
         self.interrupted_turn_id = turn_id
 
 
+class ThreadCaptureBackend(FakeBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.received_thread_id: str | None = None
+
+    async def run_turn(
+        self,
+        *,
+        project: Path,
+        text: str,
+        image_paths: tuple[Path, ...] = (),
+        thread_id: str | None = None,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+        approval_mode: ProjectApprovalMode = ProjectApprovalMode.SAFE,
+        on_turn_started: Callable[[str, str], Awaitable[None]] | None = None,
+    ) -> TurnResult:
+        self.received_thread_id = thread_id
+        return await super().run_turn(
+            project=project,
+            text=text,
+            image_paths=image_paths,
+            thread_id=None,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            approval_mode=approval_mode,
+            on_turn_started=on_turn_started,
+        )
+
+
 class ProjectContextBackend:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str | None]] = []
@@ -141,6 +171,96 @@ async def test_relay_persists_turn_before_result_and_queues_delivery(tmp_path: P
         assert conversation is not None
         assert conversation.codex_thread_id == "thread-1"
         assert result.outbound_id is not None
+
+
+@pytest.mark.asyncio
+async def test_relay_keeps_preselected_telegram_lease_until_release(tmp_path: Path) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    async with Database(tmp_path / "state.db") as database:
+        project = await database.add_project(project_path)
+        conversation = await database.get_or_create_active_conversation(project.id)
+        await database.acquire_conversation_lock(conversation.id, "telegram")
+        service = RelayService(
+            database=database,
+            backend=FakeBackend(),
+            sleep_inhibitor=FakeSleepInhibitor(),  # type: ignore[arg-type]
+        )
+
+        await service.run_current_project(
+            text="hello",
+            delivery=DeliveryTarget(
+                connector_type="telegram",
+                account_id="main",
+                external_conversation_id="123",
+            ),
+        )
+
+        current = await database.current_conversation(project.id)
+        assert current is not None and current.lock_owner == "telegram"
+
+
+@pytest.mark.asyncio
+async def test_relay_resumes_the_selected_desktop_thread(tmp_path: Path) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    async with Database(tmp_path / "state.db") as database:
+        project = await database.add_project(project_path)
+        conversation = await database.get_or_create_active_conversation(project.id)
+        await database.connection.execute(
+            "UPDATE conversations SET codex_thread_id=? WHERE id=?",
+            ("desktop-thread-1", conversation.id),
+        )
+        await database.connection.commit()
+        await database.acquire_conversation_lock(conversation.id, "telegram")
+        backend = ThreadCaptureBackend()
+        service = RelayService(
+            database=database,
+            backend=backend,
+            sleep_inhibitor=FakeSleepInhibitor(),  # type: ignore[arg-type]
+        )
+
+        await service.run_current_project(
+            text="hello",
+            delivery=DeliveryTarget(
+                connector_type="telegram",
+                account_id="main",
+                external_conversation_id="123",
+            ),
+        )
+
+        assert backend.received_thread_id == "desktop-thread-1"
+
+
+@pytest.mark.asyncio
+async def test_relay_marks_job_failed_when_conversation_is_locked_by_other_owner(
+    tmp_path: Path,
+) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    async with Database(tmp_path / "state.db") as database:
+        project = await database.add_project(project_path)
+        conversation = await database.get_or_create_active_conversation(project.id)
+        await database.acquire_conversation_lock(conversation.id, "desktop")
+        service = RelayService(
+            database=database,
+            backend=FakeBackend(),
+            sleep_inhibitor=FakeSleepInhibitor(),  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(RuntimeError, match="正在被 desktop 使用"):
+            await service.run_current_project(
+                text="hello",
+                delivery=DeliveryTarget(
+                    connector_type="telegram",
+                    account_id="main",
+                    external_conversation_id="123",
+                ),
+            )
+
+        cursor = await database.connection.execute("SELECT status FROM jobs")
+        row = await cursor.fetchone()
+        assert row is not None and row["status"] == "failed"
 
 
 @pytest.mark.asyncio

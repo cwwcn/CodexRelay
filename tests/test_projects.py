@@ -59,6 +59,23 @@ async def test_cannot_switch_project_while_a_job_is_running(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_switch_project_does_not_reuse_previous_project_conversation(tmp_path: Path) -> None:
+    first_path = tmp_path / "first"
+    second_path = tmp_path / "second"
+    first_path.mkdir()
+    second_path.mkdir()
+    async with Database(tmp_path / "state.db") as database:
+        first = await database.add_project(first_path)
+        second = await database.add_project(second_path)
+        first_conversation = await database.get_or_create_active_conversation(first.id, "First")
+        await database.switch_project(second.id)
+        second_conversation = await database.get_or_create_active_conversation(second.id, "Second")
+
+        assert first_conversation.id != second_conversation.id
+        assert second_conversation.project_id == second.id
+
+
+@pytest.mark.asyncio
 async def test_scan_maintenance_hides_missing_registered_projects(tmp_path: Path) -> None:
     existing = tmp_path / "existing"
     missing = tmp_path / "missing"

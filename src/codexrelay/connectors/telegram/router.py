@@ -4,10 +4,12 @@ import asyncio
 import re
 import secrets
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal, Protocol
 
+from codexrelay.codex.base import CodexBackend
 from codexrelay.codex.model_catalog import (
     CodexModelCatalog,
     CodexModelOption,
@@ -45,6 +47,8 @@ class TelegramRouter:
         max_image_bytes: int = 20 * 1024 * 1024,
         approval_resolver: ApprovalResolver | None = None,
         model_catalog: CodexModelCatalog | None = None,
+        codex_backend: CodexBackend | None = None,
+        release_codex_connection: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self.database = database
         self.client = client
@@ -55,6 +59,8 @@ class TelegramRouter:
         self.max_image_bytes = max_image_bytes
         self.approval_resolver = approval_resolver
         self.model_catalog = model_catalog
+        self.codex_backend = codex_backend
+        self.release_codex_connection = release_codex_connection
         self._job_lock = asyncio.Lock()
         self._security_confirmations: dict[str, tuple[str, str, str, datetime]] = {}
 
@@ -134,6 +140,13 @@ class TelegramRouter:
                 projects = await self.project_service.list_projects()
                 if selector.isdigit() and 1 <= int(selector) <= len(projects):
                     selector = projects[int(selector) - 1].id
+                previous_project = await self.database.current_project()
+                if previous_project is not None:
+                    previous_session = await self.database.current_conversation(previous_project.id)
+                    if previous_session is not None:
+                        await self.database.release_conversation_lock(
+                            previous_session.id, "telegram"
+                        )
                 try:
                     selected = await self.project_service.switch(selector)
                 except (ValueError, RuntimeError) as error:
@@ -153,8 +166,104 @@ class TelegramRouter:
             if project is None:
                 await self._reply(message, "当前没有可用项目。")
                 return
-            await self.database.start_new_conversation(project.id, project.name)
+            created = await self.database.start_new_conversation(project.id, project.name)
+            await self.database.acquire_conversation_lock(created.id, "telegram")
             await self._reply(message, f"已为 {project.name} 新建Codex对话。")
+            return
+        if command == "/sessions":
+            project = await self.database.current_project()
+            if project is None:
+                await self._reply(message, "当前没有可用项目。")
+                return
+            discovery_note = ""
+            if self.codex_backend is not None:
+                try:
+                    desktop_threads = await self.codex_backend.list_project_threads(project.path)
+                    for thread in desktop_threads:
+                        await self.database.register_external_conversation(
+                            project.id,
+                            codex_thread_id=thread.thread_id,
+                            title=thread.title,
+                            source=thread.source,
+                        )
+                except Exception:
+                    # Discovery is best-effort; a temporary SDK/store failure
+                    # must not hide persisted Telegram conversations.
+                    discovery_note = "\n（电脑端会话暂时无法同步，请稍后重试。）"
+            # A conversation without a Codex thread is only the local Telegram
+            # placeholder created before its first task runs. It is not a
+            # selectable Codex session and must not inflate the list shown to
+            # the user. Keep the numbering identical between /sessions and
+            # /session <number>.
+            sessions = self._selectable_sessions(
+                await self.database.list_conversations(project.id)
+            )
+            current = await self.database.current_conversation(project.id)
+            if not sessions:
+                await self._reply(message, "当前项目还没有会话。")
+                return
+            lines = []
+            for index, session in enumerate(sessions, start=1):
+                marker = "●" if current is not None and session.id == current.id else "○"
+                source_label = {
+                    "telegram": "Telegram",
+                    "desktop": "电脑端会话（使用前需交接）",
+                    "desktop_migrated": "电脑端相关会话（使用前需交接）",
+                    "other": "其他连接器创建",
+                }.get(session.source, "未知来源")
+                current_label = " · 当前" if marker == "●" else ""
+                lock_label = (
+                    " · Telegram占用"
+                    if session.lock_owner == "telegram"
+                    else (f" · {session.lock_owner}占用" if session.lock_owner else "")
+                )
+                lines.append(
+                    f"{marker} {index}. {session.title} · {source_label}"
+                    f"{current_label}{lock_label}"
+                )
+            await self._reply(
+                message,
+                f"当前项目会话（{len(sessions)}）：\n" + "\n".join(lines)
+                + "\n使用 /session <会话编号> 切换。"
+                + "\n电脑端会话需先关闭电脑端 Codex；也可使用 /new 创建 Telegram 会话。"
+                + discovery_note,
+            )
+            return
+        if command == "/session":
+            selector = argument.strip()
+            project = await self.database.current_project()
+            if project is None:
+                await self._reply(message, "当前没有可用项目。")
+                return
+            if not selector.isdigit():
+                await self._reply(message, "用法：/session <会话编号>，发送 /sessions 查看列表。")
+                return
+            if self._job_lock.locked() or await self.database.active_job_count():
+                await self._reply(message, "任务运行期间不能切换会话，请等待完成或先使用 /stop。")
+                return
+            sessions = self._selectable_sessions(
+                await self.database.list_conversations(project.id)
+            )
+            index = int(selector) - 1
+            if index < 0 or index >= len(sessions):
+                await self._reply(message, "未找到该会话编号，请发送 /sessions 查看列表。")
+                return
+            selected_id = sessions[index].id
+            current_session = await self.database.current_conversation(project.id)
+            try:
+                await self.database.acquire_conversation_lock(selected_id, "telegram")
+            except RuntimeError as error:
+                await self._reply(message, f"暂时无法切换会话：{error}")
+                return
+            if current_session is not None and current_session.id != selected_id:
+                await self.database.release_conversation_lock(current_session.id, "telegram")
+            selected_session = await self.database.select_conversation(selected_id, project.id)
+            self._security_confirmations.clear()
+            await self._reply(
+                message,
+                f"已切换会话：{selected_session.title}\n"
+                f"来源：{self._conversation_source_label(selected_session.source)}",
+            )
             return
         if command == "/models":
             state = await self._current_model_state()
@@ -265,8 +374,23 @@ class TelegramRouter:
             project = await self.database.current_project()
             active_jobs = await self.database.active_job_count()
             name = project.name if project is not None else "未选择"
+            conversation_status = "会话：未选择"
+            if project is not None:
+                conversation = await self.database.current_conversation(project.id)
+                if conversation is not None:
+                    lock = {
+                        None: "空闲",
+                        "telegram": "Telegram占用",
+                        "desktop": "电脑端占用",
+                    }.get(conversation.lock_owner, f"{conversation.lock_owner}占用")
+                    source_label = self._conversation_source_label(conversation.source)
+                    conversation_status = (
+                        f"会话：{conversation.title}\n"
+                        f"会话来源：{source_label}\n"
+                        f"会话状态：{lock}"
+                    )
             running_project = await self.database.active_job_project()
-            running_name = running_project.name if running_project is not None else "无"
+            running_name = running_project.name if running_project is not None else None
             approval_status = "审批模式：未选择项目"
             if project is not None:
                 approval_mode = await self.database.project_approval_mode(
@@ -287,12 +411,16 @@ class TelegramRouter:
                     f"模型：{model_option.display_name} ({model_option.model})\n"
                     f"推理强度：{reasoning_effort_label(effort)} ({effort})"
                 )
-            await self._reply(
-                message,
-                f"当前项目：{name}\n{model_status}\n{approval_status}\n"
-                f"运行中任务：{active_jobs}\n"
-                f"任务所属项目：{running_name}",
-            )
+            status_lines = [
+                f"当前项目：{name}",
+                conversation_status,
+                model_status,
+                approval_status,
+                f"运行中任务：{active_jobs}",
+            ]
+            if running_name is not None:
+                status_lines.append(f"任务所属项目：{running_name}")
+            await self._reply(message, "\n".join(status_lines))
             return
         if command in {"/security", "/approval"}:
             await self._handle_security_command(message)
@@ -307,6 +435,61 @@ class TelegramRouter:
             else:
                 reply = "当前没有运行中的任务。"
             await self._reply(message, reply)
+            return
+        if command == "/release":
+            project = await self.database.current_project()
+            if project is None:
+                await self._reply(message, "当前没有可用项目。")
+                return
+            conversation = await self.database.current_conversation(project.id)
+            if conversation is None:
+                await self._reply(message, "当前没有选中的会话。")
+                return
+            if await self.database.active_job_count():
+                await self._reply(message, "当前会话仍有任务运行，请先使用 /stop。")
+                return
+            if self.release_codex_connection is not None:
+                try:
+                    # Closing and reopening the relay's App Server connection
+                    # releases Codex's external writer lease. Releasing only
+                    # our SQLite lease is not enough for desktop hand-off.
+                    await self.release_codex_connection()
+                except Exception as error:
+                    await self._reply(message, f"暂时无法交还给电脑端 Codex：{error}")
+                    return
+            released = await self.database.release_conversation_lock(
+                conversation.id, "telegram"
+            )
+            await self._reply(
+                message,
+                "已交还电脑端 Codex。现在可以在电脑端继续使用。"
+                if released
+                else "已断开 Telegram 的 Codex 连接。现在可以在电脑端继续使用。",
+            )
+            return
+        if command == "/takeover":
+            project = await self.database.current_project()
+            if project is None:
+                await self._reply(message, "当前没有可用项目。")
+                return
+            conversation = await self.database.current_conversation(project.id)
+            if conversation is None:
+                await self._reply(message, "当前没有选中的会话。")
+                return
+            if await self.database.active_job_count():
+                await self._reply(
+                    message,
+                    "当前会话仍有任务运行。为避免中断副作用，请先使用 /stop，"
+                    "任务结束后再使用 /takeover。",
+                )
+                return
+            try:
+                await self.database.acquire_conversation_lock(conversation.id, "telegram")
+            except RuntimeError as error:
+                await self._reply(message, f"暂时无法接管：{error}")
+                return
+            self._security_confirmations.clear()
+            await self._reply(message, f"已接管会话：{conversation.title}")
             return
 
         async with self._job_lock:
@@ -351,6 +534,8 @@ class TelegramRouter:
                     "当前项目访问权限不可用。请在 Mac 端的‘系统设置 → 隐私与安全性’中允许 "
                     "CodexRelay 访问该目录后再试。",
                 )
+            except Exception as error:
+                await self._reply(message, self._task_error_message(error))
             finally:
                 await progress.finish()
                 for image in images:
@@ -360,6 +545,36 @@ class TelegramRouter:
                         images[0].parent.rmdir()
                     except OSError:
                         pass
+
+    @staticmethod
+    def _selectable_sessions(sessions: list[Conversation]) -> list[Conversation]:
+        """Return only real Codex threads, preserving visible selection order."""
+        return [session for session in sessions if session.codex_thread_id is not None]
+
+    @staticmethod
+    def _conversation_source_label(source: str) -> str:
+        return {
+            "telegram": "Telegram",
+            "desktop": "电脑上创建",
+            "desktop_migrated": "电脑端相关会话",
+            "other": "其他连接器创建",
+        }.get(source, "未知来源")
+
+    @staticmethod
+    def _task_error_message(error: Exception) -> str:
+        detail = str(error)
+        lowered = detail.casefold()
+        if "already has an active writer" in lowered:
+            return (
+                "任务未执行：这个会话当前由电脑端 Codex 持有。即使没有运行任务，"
+                "桌面端打开该会话时也不能从 Telegram 写入。请完全退出电脑端 Codex 后重试，"
+                "或使用 /new 创建 Telegram 独立会话。"
+            )
+        if "is archived" in lowered or "已归档" in lowered:
+            return "任务未执行：这个会话已在 Codex 中归档，请先在电脑端恢复后再试。"
+        if detail:
+            return f"任务未执行：{detail[:500]}"
+        return "任务未执行：Codex 返回了未知错误，请稍后重试。"
 
     async def _download_images(self, message: IncomingMessage) -> tuple[Path, ...]:
         if not message.images:

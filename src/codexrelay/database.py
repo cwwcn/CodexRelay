@@ -22,7 +22,7 @@ from codexrelay.models import (
     ProjectApprovalMode,
 )
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
 
 MIGRATION_1 = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -217,6 +217,19 @@ CREATE TABLE IF NOT EXISTS project_approval_policies (
 );
 """
 
+MIGRATION_6 = """
+ALTER TABLE conversations ADD COLUMN scope TEXT NOT NULL DEFAULT 'project';
+ALTER TABLE conversations ADD COLUMN source TEXT NOT NULL DEFAULT 'telegram';
+ALTER TABLE conversations ADD COLUMN last_used_at TEXT NOT NULL DEFAULT '';
+ALTER TABLE conversations ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE conversations ADD COLUMN archived_at TEXT NULL;
+ALTER TABLE conversations ADD COLUMN lock_owner TEXT NULL;
+"""
+
+MIGRATION_7 = """
+ALTER TABLE app_state ADD COLUMN current_conversation_id TEXT NULL;
+"""
+
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds")
@@ -351,6 +364,28 @@ class Database:
         if version < 5:
             await connection.executescript(MIGRATION_5)
             await connection.execute("INSERT INTO schema_version(version) VALUES (?)", (5,))
+            await connection.commit()
+            version = 5
+        if version < 6:
+            await connection.executescript(MIGRATION_6)
+            await connection.execute(
+                "UPDATE conversations SET last_used_at=updated_at WHERE last_used_at=''"
+            )
+            await connection.execute("INSERT INTO schema_version(version) VALUES (?)", (6,))
+            await connection.commit()
+            version = 6
+        if version < 7:
+            await connection.executescript(MIGRATION_7)
+            await connection.execute(
+                """UPDATE app_state SET current_conversation_id=(
+                       SELECT c.id FROM conversations c
+                       WHERE c.project_id=app_state.current_project_id
+                         AND c.archived_at IS NULL
+                       ORDER BY c.last_used_at DESC, c.updated_at DESC
+                       LIMIT 1
+                   ) WHERE singleton=1 AND current_conversation_id IS NULL"""
+            )
+            await connection.execute("INSERT INTO schema_version(version) VALUES (?)", (7,))
             await connection.commit()
 
     async def add_project(self, path: Path, name: str | None = None) -> Project:
@@ -490,7 +525,10 @@ class Database:
             if state["current_project_id"] != project_id:
                 await self.reset_project_approval_policies(connection)
             await connection.execute(
-                "UPDATE app_state SET current_project_id=? WHERE singleton=1", (project_id,)
+                """UPDATE app_state
+                   SET current_project_id=?, current_conversation_id=NULL
+                   WHERE singleton=1""",
+                (project_id,),
             )
         updated = await self.get_project(project_id)
         if updated is None:
@@ -763,11 +801,13 @@ class Database:
 
     async def create_conversation(
         self,
-        project_id: str,
+        project_id: str | None,
         title: str,
         *,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        scope: str = "project",
+        source: str = "telegram",
     ) -> str:
         conversation_id = str(uuid.uuid4())
         now = utc_now()
@@ -776,8 +816,8 @@ class Database:
                 """
                 INSERT INTO conversations(
                     id, project_id, title, status, model, reasoning_effort,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, 'active', ?, ?, ?, ?)
+                    scope, source, last_used_at, created_at, updated_at
+                ) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     conversation_id,
@@ -785,6 +825,9 @@ class Database:
                     title.strip() or "New conversation",
                     model,
                     reasoning_effort,
+                    scope,
+                    source,
+                    now,
                     now,
                     now,
                 ),
@@ -806,14 +849,95 @@ class Database:
         row = await cursor.fetchone()
         return None if row is None else self._conversation_from_row(row)
 
+    async def current_conversation(self, project_id: str) -> Conversation | None:
+        cursor = await self.connection.execute(
+            """SELECT c.id, c.project_id, c.codex_thread_id, c.title, c.status,
+                      c.last_message_id, c.model, c.reasoning_effort, c.scope,
+                      c.source, c.last_used_at, c.is_pinned, c.archived_at, c.lock_owner
+               FROM conversations c JOIN app_state s
+                 ON s.current_conversation_id=c.id
+               WHERE c.project_id=? AND c.archived_at IS NULL""",
+            (project_id,),
+        )
+        row = await cursor.fetchone()
+        return None if row is None else self._conversation_from_row(row)
+
+    async def select_conversation(self, conversation_id: str, project_id: str) -> Conversation:
+        now = utc_now()
+        async with self.transaction() as connection:
+            cursor = await connection.execute(
+                "SELECT id FROM conversations WHERE id=? AND project_id=? AND archived_at IS NULL",
+                (conversation_id, project_id),
+            )
+            if await cursor.fetchone() is None:
+                raise RuntimeError("会话不存在或已归档")
+            await connection.execute(
+                "UPDATE app_state SET current_conversation_id=? WHERE singleton=1",
+                (conversation_id,),
+            )
+            await connection.execute(
+                "UPDATE conversations SET last_used_at=?, updated_at=? WHERE id=?",
+                (now, now, conversation_id),
+            )
+        selected = await self.conversation(conversation_id)
+        if selected is None:
+            raise RuntimeError("会话切换后无法读取会话")
+        return selected
+
+    async def acquire_conversation_lock(self, conversation_id: str, owner: str) -> None:
+        async with self.transaction() as connection:
+            cursor = await connection.execute(
+                "SELECT lock_owner FROM conversations WHERE id=? AND archived_at IS NULL",
+                (conversation_id,),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                raise RuntimeError("会话不存在或已归档")
+            current = row["lock_owner"]
+            if current is not None and str(current) != owner:
+                raise RuntimeError(f"会话正在被 {current} 使用")
+            await connection.execute(
+                "UPDATE conversations SET lock_owner=?, last_used_at=?, updated_at=? WHERE id=?",
+                (owner, utc_now(), utc_now(), conversation_id),
+            )
+
+    async def release_conversation_lock(
+        self, conversation_id: str, owner: str | None = None
+    ) -> bool:
+        async with self.transaction() as connection:
+            if owner is None:
+                result = await connection.execute(
+                    "UPDATE conversations SET lock_owner=NULL, updated_at=? WHERE id=?",
+                    (utc_now(), conversation_id),
+                )
+            else:
+                result = await connection.execute(
+                    "UPDATE conversations SET lock_owner=NULL, updated_at=? "
+                    "WHERE id=? AND lock_owner=?",
+                    (utc_now(), conversation_id, owner),
+                )
+            return result.rowcount == 1
+
     async def get_or_create_active_conversation(
         self, project_id: str, title: str = "CodexRelay"
     ) -> Conversation:
-        existing = await self.active_conversation(project_id)
+        existing = await self.current_conversation(project_id)
+        if existing is None:
+            existing = await self.active_conversation(project_id)
         if existing is not None:
+            async with self.transaction() as connection:
+                await connection.execute(
+                    "UPDATE app_state SET current_conversation_id=? WHERE singleton=1",
+                    (existing.id,),
+                )
             return existing
         conversation_id = await self.create_conversation(project_id, title)
-        created = await self.active_conversation(project_id)
+        async with self.transaction() as connection:
+            await connection.execute(
+                "UPDATE app_state SET current_conversation_id=? WHERE singleton=1",
+                (conversation_id,),
+            )
+        created = await self.conversation(conversation_id)
         if created is None or created.id != conversation_id:
             raise RuntimeError("failed to create active conversation")
         return created
@@ -842,17 +966,10 @@ class Database:
             previous = await cursor.fetchone()
             await connection.execute(
                 """
-                UPDATE conversations SET status='archived', updated_at=?
-                WHERE project_id=? AND status='active'
-                """,
-                (now, project_id),
-            )
-            await connection.execute(
-                """
                 INSERT INTO conversations(
                     id, project_id, title, status, model, reasoning_effort,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, 'active', ?, ?, ?, ?)
+                    scope, source, last_used_at, created_at, updated_at
+                ) VALUES (?, ?, ?, 'active', ?, ?, 'project', 'telegram', ?, ?, ?)
                 """,
                 (
                     conversation_id,
@@ -862,9 +979,14 @@ class Database:
                     None if previous is None else previous["reasoning_effort"],
                     now,
                     now,
+                    now,
                 ),
             )
-        created = await self.active_conversation(project_id)
+            await connection.execute(
+                "UPDATE app_state SET current_conversation_id=? WHERE singleton=1",
+                (conversation_id,),
+            )
+        created = await self.conversation(conversation_id)
         if created is None or created.id != conversation_id:
             raise RuntimeError("failed to start a new conversation")
         return created
@@ -873,13 +995,74 @@ class Database:
         cursor = await self.connection.execute(
             """
             SELECT id, project_id, codex_thread_id, title, status, last_message_id,
-                   model, reasoning_effort
+                   model, reasoning_effort, scope, source, last_used_at,
+                   is_pinned, archived_at, lock_owner
             FROM conversations WHERE id=?
             """,
             (conversation_id,),
         )
         row = await cursor.fetchone()
         return None if row is None else self._conversation_from_row(row)
+
+    async def list_conversations(self, project_id: str) -> list[Conversation]:
+        cursor = await self.connection.execute(
+            """SELECT id, project_id, codex_thread_id, title, status, last_message_id,
+                      model, reasoning_effort, scope, source, last_used_at,
+                      is_pinned, archived_at, lock_owner
+               FROM conversations
+               WHERE project_id=? AND archived_at IS NULL
+               ORDER BY is_pinned DESC, last_used_at DESC, created_at DESC""",
+            (project_id,),
+        )
+        return [self._conversation_from_row(row) for row in await cursor.fetchall()]
+
+    async def register_external_conversation(
+        self,
+        project_id: str,
+        *,
+        codex_thread_id: str,
+        title: str,
+        source: str = "desktop",
+    ) -> Conversation:
+        """Register a locally discovered Codex thread idempotently."""
+        now = utc_now()
+        clean_title = title.strip() or "未命名会话"
+        async with self.transaction() as connection:
+            cursor = await connection.execute(
+                """SELECT id FROM conversations
+                   WHERE project_id=? AND codex_thread_id=? AND archived_at IS NULL
+                   LIMIT 1""",
+                (project_id, codex_thread_id),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                conversation_id = str(uuid.uuid4())
+                await connection.execute(
+                    """INSERT INTO conversations(
+                           id, project_id, codex_thread_id, title, status, source,
+                           scope, last_used_at, created_at, updated_at
+                       ) VALUES (?, ?, ?, ?, 'active', ?, 'project', ?, ?, ?)""",
+                    (
+                        conversation_id,
+                        project_id,
+                        codex_thread_id,
+                        clean_title,
+                        source,
+                        now,
+                        now,
+                        now,
+                    ),
+                )
+            else:
+                conversation_id = str(row["id"])
+                await connection.execute(
+                    "UPDATE conversations SET title=?, source=?, updated_at=? WHERE id=?",
+                    (clean_title, source, now, conversation_id),
+                )
+        conversation = await self.conversation(conversation_id)
+        if conversation is None:
+            raise RuntimeError("external conversation disappeared after registration")
+        return conversation
 
     async def set_active_conversation_model(
         self,
@@ -904,21 +1087,27 @@ class Database:
             if int(active["count"]):
                 raise RuntimeError("任务运行期间不能修改模型或推理强度。")
             cursor = await connection.execute(
-                """
-                SELECT id FROM conversations
-                WHERE project_id=? AND status='active'
-                ORDER BY updated_at DESC LIMIT 1
-                """,
+                """SELECT c.id FROM conversations c
+                   JOIN app_state s ON s.current_conversation_id=c.id
+                   WHERE c.project_id=? AND c.archived_at IS NULL""",
                 (project_id,),
             )
             existing = await cursor.fetchone()
+            if existing is None:
+                cursor = await connection.execute(
+                    """SELECT id FROM conversations
+                       WHERE project_id=? AND archived_at IS NULL
+                       ORDER BY last_used_at DESC, created_at DESC LIMIT 1""",
+                    (project_id,),
+                )
+                existing = await cursor.fetchone()
             if existing is None:
                 await connection.execute(
                     """
                     INSERT INTO conversations(
                         id, project_id, title, status, model, reasoning_effort,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, 'active', ?, ?, ?, ?)
+                        scope, source, last_used_at, created_at, updated_at
+                    ) VALUES (?, ?, ?, 'active', ?, ?, 'project', 'telegram', ?, ?, ?)
                     """,
                     (
                         conversation_id,
@@ -928,6 +1117,7 @@ class Database:
                         reasoning_effort,
                         now,
                         now,
+                        now,
                     ),
                 )
             else:
@@ -935,11 +1125,15 @@ class Database:
                 await connection.execute(
                     """
                     UPDATE conversations
-                    SET model=?, reasoning_effort=?, updated_at=?
+                    SET model=?, reasoning_effort=?, last_used_at=?, updated_at=?
                     WHERE id=?
                     """,
-                    (model, reasoning_effort, now, conversation_id),
+                    (model, reasoning_effort, now, now, conversation_id),
                 )
+            await connection.execute(
+                "UPDATE app_state SET current_conversation_id=? WHERE singleton=1",
+                (conversation_id,),
+            )
         configured = await self.conversation(conversation_id)
         if configured is None:
             raise RuntimeError("conversation disappeared after model update")
@@ -1255,6 +1449,25 @@ class Database:
                 """,
                 (
                     JobStatus.INTERRUPTED,
+                    utc_now(),
+                    JobStatus.STARTING,
+                    JobStatus.RUNNING,
+                    JobStatus.WAITING_APPROVAL,
+                ),
+            )
+        return result.rowcount
+
+    async def clear_stale_conversation_locks(self) -> int:
+        """Clear leases left by a crashed runtime after stale jobs are reconciled."""
+        async with self.transaction() as connection:
+            result = await connection.execute(
+                """UPDATE conversations SET lock_owner=NULL, updated_at=?
+                   WHERE lock_owner IS NOT NULL
+                     AND id NOT IN (
+                       SELECT conversation_id FROM jobs
+                       WHERE status IN (?, ?, ?)
+                     )""",
+                (
                     utc_now(),
                     JobStatus.STARTING,
                     JobStatus.RUNNING,
@@ -1635,7 +1848,7 @@ class Database:
     def _conversation_from_row(row: aiosqlite.Row) -> Conversation:
         return Conversation(
             id=str(row["id"]),
-            project_id=str(row["project_id"]),
+            project_id=str(row["project_id"]) if row["project_id"] is not None else None,
             codex_thread_id=(
                 str(row["codex_thread_id"]) if row["codex_thread_id"] is not None else None
             ),
@@ -1648,6 +1861,24 @@ class Database:
             reasoning_effort=(
                 str(row["reasoning_effort"])
                 if row["reasoning_effort"] is not None
+                else None
+            ),
+            scope=str(row["scope"]) if "scope" in row.keys() else "project",
+            source=str(row["source"]) if "source" in row.keys() else "telegram",
+            last_used_at=(
+                str(row["last_used_at"])
+                if "last_used_at" in row.keys()
+                else ""
+            ),
+            is_pinned=bool(row["is_pinned"]) if "is_pinned" in row.keys() else False,
+            archived_at=(
+                str(row["archived_at"])
+                if "archived_at" in row.keys() and row["archived_at"] is not None
+                else None
+            ),
+            lock_owner=(
+                str(row["lock_owner"])
+                if "lock_owner" in row.keys() and row["lock_owner"] is not None
                 else None
             ),
         )

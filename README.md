@@ -110,23 +110,48 @@ When a project is added, CodexRelay performs a minimal access preflight immediat
 
 ## Telegram commands
 
+For daily use, remember these four commands:
+
+```text
+/projects       List projects
+/use 1          Select a project
+/sessions       List conversations in the project
+/session 1      Select a conversation
+```
+
+After selecting a project and conversation, send ordinary text to run a task. Use `/new` when you need a fresh context; use `/stop` when you need to stop a running task.
+
+Full command reference:
+
 ```text
 /help
 /projects
 /use 1
 /use CodexRelay
 /new
+ Create a new conversation for the current project
+/sessions
+ List conversations for the current project
+/session <number>
+ Switch the current conversation
 /models
 /model 2
 /reasoning high
 /status
 /security
 /stop
+ Stop the current task
+/release
+ Release the current conversation
+/takeover
+ Take over the current conversation
 ```
 
-`/security` shows the current project's approval mode. Safe mode asks for each elevated operation in Telegram. “Auto-allow within this project” requires a second confirmation and only accepts operations that remain inside the current project directory; network and out-of-project requests still cannot be silently approved. It is disabled again after switching projects or pairing a different Telegram account. This setting is stored in CodexRelay's local database and does not modify `~/.codex/config.toml`.
+`/help` groups commands into daily actions, task control, configuration and security, and first-time setup. `/security` shows the current project's approval mode. Safe mode asks for each elevated operation in Telegram. “Auto-allow within this project” requires a second confirmation and only accepts operations that remain inside the current project directory; network and out-of-project requests still cannot be silently approved. It is disabled again after switching projects or pairing a different Telegram account. This setting is stored in CodexRelay's local database and does not modify `~/.codex/config.toml`.
 
 Project switching is allowed only after the current task finishes. To switch immediately, send `/stop` first, then `/use`. Switching projects does not clear the previous project's conversation.
+
+A project can contain multiple conversations. Use `/sessions` to list both Telegram-created conversations and conversations created on the computer, `/session <number>` to select one, and `/new` to create one. If a project directory was moved, a matching computer-created thread may be shown as `电脑上创建（路径已迁移）`; selecting it resumes the original context using the current project path. The source label describes where the conversation was created; the occupancy label separately describes which side currently holds it. Selecting a conversation claims it for Telegram; use `/release` when you want to let the computer side or another connector use it again. Conversation context is isolated, and model/reasoning settings follow each conversation. `/takeover` can claim an idle conversation explicitly. After an abnormal exit, stale leases with no active task are cleared automatically.
 
 ## Models and reasoning effort
 

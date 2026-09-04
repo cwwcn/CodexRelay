@@ -26,6 +26,9 @@ class AppStatusSnapshot:
     active_job_status: JobStatus | None = None
     model: str | None = None
     reasoning_effort: str | None = None
+    conversation_title: str | None = None
+    conversation_source: str | None = None
+    conversation_lock_owner: str | None = None
     last_error: str | None = None
 
     @property
@@ -70,6 +73,9 @@ class AppStatusSnapshot:
         active_job_status: JobStatus | None,
         model: str | None,
         reasoning_effort: str | None,
+        conversation_title: str | None = None,
+        conversation_source: str | None = None,
+        conversation_lock_owner: str | None = None,
     ) -> AppStatusSnapshot:
         return replace(
             self,
@@ -80,4 +86,7 @@ class AppStatusSnapshot:
             active_job_status=active_job_status,
             model=model,
             reasoning_effort=reasoning_effort,
+            conversation_title=conversation_title,
+            conversation_source=conversation_source,
+            conversation_lock_owner=conversation_lock_owner,
         )

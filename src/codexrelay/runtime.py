@@ -75,6 +75,7 @@ class CodexRelayRuntime:
         try:
             await database.expire_pending_approvals()
             await database.interrupt_stale_jobs()
+            await database.clear_stale_conversation_locks()
             await database.housekeep()
             for project in await database.list_projects():
                 try:
@@ -119,6 +120,8 @@ class CodexRelayRuntime:
             max_image_bytes=settings.telegram.max_image_bytes,
             approval_resolver=approvals,
             model_catalog=model_catalog,
+            codex_backend=backend,
+            release_codex_connection=self.release_codex_connection,
         )
         poller = TelegramPoller(
             database=database,
@@ -187,6 +190,14 @@ class CodexRelayRuntime:
             await inhibitor.close()
         if database is not None:
             await database.close()
+
+    async def release_codex_connection(self) -> None:
+        """Release Codex writer leases so the desktop client can take over."""
+        backend = self.backend
+        if backend is None:
+            raise RuntimeError("Codex 服务尚未连接")
+        await backend.stop()
+        await backend.start()
 
     async def _run_outbox(self, stop: asyncio.Event) -> None:
         if self.outbox is None:

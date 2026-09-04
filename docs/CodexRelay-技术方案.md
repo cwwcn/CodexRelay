@@ -49,7 +49,7 @@ Codex App Server
 
 - 不提供多租户云服务或远程执行平台。
 - 不在应用内重新实现 Codex，也不管理 Codex 登录凭据。
-- 当前不支持群聊、多用户协作和跨渠道会话同步。
+- 当前不支持群聊、多用户协作；Telegram 与电脑端 Codex 的同项目会话发现和接续属于单用户本地协同能力，不扩展为云端跨用户同步。
 - 当前只实现 Telegram，不提供动态安装第三方连接器的插件市场。
 - 更新由 macOS 应用发起：检查 GitHub Releases，按当前 Mac 架构选择 DMG，校验 SHA-256 后打开安装包。应用不后台覆盖正在运行的自身，用户完成最后的拖入“应用程序”步骤。
 
@@ -186,15 +186,21 @@ Telegram 文本超过单条消息限制时由 API 层分段发送。分段器优
 /projects             查看已授权项目
 /use <编号或名称>     切换当前项目
 /new                  为当前项目创建新对话
+/sessions             查看当前项目会话
+/session <编号>       切换当前项目会话
 /models               查看可用模型
 /model <编号或名称>   修改当前会话模型
 /reasoning <强度>     修改当前会话推理强度
 /status               查看连接、项目和任务状态
 /security             查看或修改当前项目审批模式
 /stop                 中断当前任务
+/release              释放当前会话占用
+/takeover             接管当前会话
 ```
 
 命令解析在 Telegram Router 中完成，但真正的项目切换、会话创建和任务状态修改仍通过 Core/Database 服务执行。
+
+0.2.0 起，一个项目允许多个 Conversation。`app_state.current_conversation_id` 记录当前选中的会话；切换项目时清空该指针，进入新项目后再选择或创建会话。会话的 `source` 表示它最初在哪一端创建（Telegram 创建、电脑上创建或其他连接器创建），`lock_owner` 则独立表示当前由哪一端占用，不能混为同一个概念。`/sessions` 在请求时通过 Codex App Server 的 `thread/list` 同步电脑端会话：当前 `cwd` 精确匹配的 thread 直接列出；当项目目录迁移后，标题明确匹配当前项目名但 cwd 不同的桌面 thread 以“路径已迁移”标记列出，供用户显式选择并用当前路径恢复。同步按 Codex thread ID 幂等注册，不复制上下文，也不按模糊项目名放开全部会话。会话拥有独立的 Codex thread、模型配置和上下文，不会因为出现在“最近”视图中而改变项目归属。使用 `/session` 选择会话后，Telegram 会持有该会话租约；`/release` 释放当前会话，让电脑端或其他连接器继续使用；`/takeover` 用于显式接管空闲会话。启动恢复阶段会清理没有活动任务支撑的遗留租约，避免异常退出造成永久占用。
 
 应用连接 Telegram 时还会通过 `setMyCommands` 注册这组命令的中文说明，并限定在私聊范围内。这样用户在 Telegram 输入 `/` 时可以看到原生命令提示；命令菜单属于 Telegram Connector 的体验能力，不会成为其他连接器必须实现的共性接口。命令名称、菜单说明和 `/help` 文本由 Telegram Connector 内部的单一注册表生成，新增 Telegram 命令时不需要同步维护多份列表。
 

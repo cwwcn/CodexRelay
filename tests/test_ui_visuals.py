@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import QSize
+from PySide6.QtCore import QSize, QThreadPool
 from PySide6.QtWidgets import QApplication
 
+from codexrelay.paths import AppPaths
 from codexrelay.ui.app import (
     STYLE_SHEET,
     AsyncWorker,
     ChoiceButton,
     MenuOverview,
     QuitConfirmationDialog,
+    SettingsWindow,
     ToggleSwitch,
     make_icon,
 )
@@ -132,7 +134,8 @@ def test_menu_overview_renders_connected_project_and_task_state() -> None:
     assert overview.connection.text() == "Telegram 已连接 · 待完成配对"
     assert overview.project.text() == "CodexRelay"
     assert overview.task.text() == "空闲"
-    assert overview.session_value.text() == "gpt-5.6-sol · medium"
+    assert overview.session_value.text() == "未选择会话"
+    assert overview.model_value.text() == "gpt-5.6-sol · medium"
     assert overview.task_detail.text() == "没有运行中的任务"
 
 
@@ -150,6 +153,32 @@ def test_menu_overview_renders_paired_telegram_state() -> None:
 
     assert application is not None
     assert overview.connection.text() == "Telegram 已连接 · 已配对"
+
+
+def test_runtime_failure_clears_model_loading_state() -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    application = QApplication.instance() or QApplication([])
+    window = SettingsWindow(AppPaths.default(), QThreadPool.globalInstance())
+
+    window.set_runtime_failed("TelegramTransportError: Telegram getMe request failed")
+
+    assert application is not None
+    assert window.model_scope.text() == "连接服务失败，暂时无法读取当前项目配置。"
+    assert "重新连接" in window.model_description.text()
+    assert not window.model_combo.isEnabled()
+    assert not window.reasoning_combo.isEnabled()
+    assert window.overview_message.text() == "Telegram 暂时无法连接，请检查网络后点击“重新连接”。"
+
+
+def test_runtime_missing_token_uses_setup_message() -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    application = QApplication.instance() or QApplication([])
+    window = SettingsWindow(AppPaths.default(), QThreadPool.globalInstance())
+
+    window.set_runtime_failed("RuntimeError: Telegram Bot Token is not configured in CodexRelay")
+
+    assert application is not None
+    assert window.overview_message.text() == "尚未配置 Telegram Bot Token，请打开设置完成配置。"
 
 
 def test_updates_are_disabled_until_a_signed_release_provider_is_configured() -> None:
