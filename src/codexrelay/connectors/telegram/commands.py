@@ -30,17 +30,20 @@ class TelegramCommand:
         return {"command": self.name, "description": self.description}
 
 
-# This is the single source of truth for Telegram's command menu and /help.
-# Adding a command here updates both surfaces without touching Core.
+# This is the single source of truth for Telegram's primary command menu and
+# /help. Project management lives in the Mac app's System page; compatibility
+# commands remain accepted by Router but are not advertised in the native menu.
 TELEGRAM_COMMANDS: tuple[TelegramCommand, ...] = (
     TelegramCommand("start", "开始使用 CodexRelay", "开始使用 CodexRelay"),
     TelegramCommand("help", "查看帮助", "查看帮助"),
     TelegramCommand("pair", "使用 Mac 端配对码", "使用 Mac 端配对码"),
-    TelegramCommand("projects", "查看已授权项目", "查看已授权项目"),
-    TelegramCommand("use", "切换当前项目", "切换当前项目：/use <编号或名称>"),
-    TelegramCommand("new", "新建当前项目对话", "新建当前项目对话"),
-    TelegramCommand("sessions", "查看当前项目会话", "查看当前项目会话"),
-    TelegramCommand("session", "切换当前项目会话", "切换会话：/session <编号>"),
+    TelegramCommand("new", "在当前目录新建会话", "在当前会话工作目录新建会话"),
+    TelegramCommand(
+        "sessions",
+        "查看全部会话",
+        "查看全部会话（项目归属会显示在列表中）",
+    ),
+    TelegramCommand("session", "切换当前会话", "切换会话：/session <编号>"),
     TelegramCommand("models", "查看可用模型", "查看可用模型"),
     TelegramCommand("model", "选择当前会话模型", "选择模型：/model <编号或名称>"),
     TelegramCommand(
@@ -51,8 +54,8 @@ TELEGRAM_COMMANDS: tuple[TelegramCommand, ...] = (
     TelegramCommand("status", "查看当前状态", "查看当前状态"),
     TelegramCommand(
         "security",
-        "设置项目审批模式",
-        "设置项目审批模式（别名：/approval）",
+        "设置当前会话安全模式",
+        "设置当前会话安全模式（别名：/approval）",
     ),
     TelegramCommand("stop", "停止当前任务", "停止当前任务"),
     TelegramCommand("release", "清理异常状态", "清理异常遗留状态（通常无需使用）"),
@@ -60,6 +63,19 @@ TELEGRAM_COMMANDS: tuple[TelegramCommand, ...] = (
         "takeover",
         "查看会话接力说明",
         "查看会话接力说明（兼容命令，无需手动接管）",
+    ),
+)
+
+TELEGRAM_COMPATIBILITY_COMMANDS: tuple[TelegramCommand, ...] = (
+    TelegramCommand(
+        "projects",
+        "查看会话的项目归属（兼容）",
+        "查看会话的项目归属（兼容命令；切换会话请使用 /sessions）",
+    ),
+    TelegramCommand(
+        "use",
+        "按项目选择会话（兼容）",
+        "按项目选择最近会话（兼容命令；推荐使用 /session）",
     ),
 )
 
@@ -71,15 +87,17 @@ def bot_api_commands() -> tuple[dict[str, str], ...]:
 
 def recognized_command_names() -> frozenset[str]:
     """Return canonical commands plus compatibility aliases accepted by Router."""
-    return frozenset(command.name for command in TELEGRAM_COMMANDS) | frozenset(
-        TELEGRAM_COMMAND_ALIASES
+    return (
+        frozenset(command.name for command in TELEGRAM_COMMANDS)
+        | frozenset(command.name for command in TELEGRAM_COMPATIBILITY_COMMANDS)
+        | frozenset(TELEGRAM_COMMAND_ALIASES)
     )
 
 
 def help_text() -> str:
     """Render the same command registry as the Telegram /help response."""
     groups = (
-        ("常用操作", {"projects", "use", "sessions", "session", "new", "status"}),
+        ("会话操作", {"sessions", "session", "new", "status"}),
         ("任务控制", {"stop", "release", "takeover"}),
         ("配置与安全", {"models", "model", "reasoning", "security"}),
         ("首次设置", {"pair"}),
@@ -94,4 +112,11 @@ def help_text() -> str:
                 + "：\n"
                 + "\n".join(f"/{command.name} {command.help_text}" for command in commands)
             )
+    sections.append(
+        "兼容命令（项目管理请在 Mac 端‘系统’页完成）：\n"
+        + "\n".join(
+            f"/{command.name} {command.help_text}"
+            for command in TELEGRAM_COMPATIBILITY_COMMANDS
+        )
+    )
     return "\n\n".join(sections)

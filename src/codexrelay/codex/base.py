@@ -30,6 +30,48 @@ class DesktopThread:
     cwd_matches_project: bool = True
 
 
+def select_project_threads(
+    threads: list[DesktopThread],
+    project: Path,
+    project_name: str,
+    assigned_thread_ids: set[str] | None = None,
+) -> list[DesktopThread]:
+    """Select cwd-contained, explicitly assigned, or safely migrated threads."""
+    resolved_project = project.expanduser().resolve()
+    selected: list[DesktopThread] = []
+    for thread in threads:
+        resolved_cwd = thread.cwd.expanduser().resolve()
+        try:
+            resolved_cwd.relative_to(resolved_project)
+            cwd_matches = True
+        except ValueError:
+            cwd_matches = False
+        migrated_match = (
+            not thread.cwd.expanduser().is_dir()
+            and project_name.casefold() in thread.title.casefold()
+        )
+        explicitly_assigned = (
+            assigned_thread_ids is not None and thread.thread_id in assigned_thread_ids
+        )
+        if not cwd_matches and not migrated_match and not explicitly_assigned:
+            continue
+        source = thread.source
+        if source == "desktop" and not cwd_matches:
+            source = "desktop_migrated"
+        selected.append(
+            DesktopThread(
+                thread_id=thread.thread_id,
+                title=thread.title,
+                cwd=thread.cwd,
+                updated_at=thread.updated_at,
+                is_active=thread.is_active,
+                source=source,
+                cwd_matches_project=cwd_matches,
+            )
+        )
+    return selected
+
+
 class CodexBackend(Protocol):
     async def start(self) -> None: ...
 
@@ -61,3 +103,5 @@ class CodexBackend(Protocol):
     async def interrupt(self, turn_id: str) -> None: ...
 
     async def list_project_threads(self, project: Path) -> list[DesktopThread]: ...
+
+    async def list_all_threads(self) -> list[DesktopThread]: ...

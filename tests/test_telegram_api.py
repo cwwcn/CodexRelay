@@ -181,8 +181,6 @@ def test_telegram_command_registry_drives_help_text() -> None:
         "start",
         "help",
         "pair",
-        "projects",
-        "use",
         "new",
         "sessions",
         "session",
@@ -195,7 +193,7 @@ def test_telegram_command_registry_drives_help_text() -> None:
         "release",
         "takeover",
     ]
-    assert "/use 切换当前项目：/use <编号或名称>" in help_text()
+    assert "/use 按项目选择最近会话（兼容命令；推荐使用 /session）" in help_text()
     assert "别名：/approval" in help_text()
     assert "别名：/effort" in help_text()
     assert recognized_command_names() >= {"security", "approval", "reasoning", "effort"}

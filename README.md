@@ -12,7 +12,7 @@
 
 **Use Codex on your own Mac from Telegram.**
 
-CodexRelay is a macOS menu bar app that connects Telegram with a local Codex runtime. Your Mac executes the work in an explicitly authorized project directory, while Telegram provides the remote conversation, approvals, and status updates. Project sessions, context, model settings, and approval state stay on your Mac so you can return to a project without losing the thread.
+CodexRelay is a macOS menu bar app that connects Telegram with a local Codex runtime. Your Mac executes work in the selected conversation's working directory, while Telegram provides remote conversation, approvals, and status updates. Conversations, optional project associations, context, model settings, and approval state stay on your Mac.
 
 English | [简体中文](README.zh-CN.md) | [Documentation](docs/)
 
@@ -22,19 +22,19 @@ English | [简体中文](README.zh-CN.md) | [Documentation](docs/)
 
 ## Why CodexRelay
 
-Send a task to your Telegram bot and let your own Mac run Codex in a project you have explicitly approved. Results and progress are sent back to Telegram. CodexRelay is not a hosted code execution service: the task runs locally on your Mac.
+Send a task to your Telegram bot and let your own Mac run Codex in the selected conversation's working directory. A conversation may be associated with an explicitly approved project, or remain unassigned. Results and progress are sent back to Telegram. CodexRelay is not a hosted code execution service: the task runs locally on your Mac.
 
 ## Features
 
 - Telegram text and image input;
 - One-time pairing code and single-user authorization;
-- Project directories must be explicitly approved in the Mac app;
-- An independent Codex thread for each project, restored when you switch back;
-- Per-project Codex model and reasoning-effort settings;
-- One active task globally in the first release; project switching is blocked while a task is running;
+- Project directories are explicitly approved in the Mac app and may optionally be associated with a conversation;
+- An independent Codex thread for each conversation, including conversations without a project;
+- Per-conversation Codex model and reasoning-effort settings;
+- One active task globally; switching conversations is blocked while a task is running;
 - Durable persistence for Codex threads/turns, Telegram inbox/outbox, and task state;
 - One-time Telegram approval for dangerous commands, file changes, and extra permissions;
-- Optional per-project “auto-allow within this project” approval mode, protected by explicit confirmation;
+- Optional per-project “auto-allow within this project” approval mode, protected by explicit confirmation; unassigned conversations remain fully usable and use controlled safe mode for risky operations;
 - Menu bar overview panel, settings window, task stop action, and quit confirmation;
 - Telegram Bot Token stored in CodexRelay's private app-data file with user-only permissions;
 - Optional sleep prevention while a task is running;
@@ -98,7 +98,7 @@ uv run codexrelay-gui
 1. Install and authenticate Codex CLI on the Mac;
 2. Create a bot with [@BotFather](https://t.me/BotFather) and copy its Bot Token;
 3. Enter the token on CodexRelay's **Telegram** page;
-4. Add and approve a project directory on the **Projects** page;
+4. Optionally add and approve project directories from the **System** page's project section. A conversation may remain unassigned;
 5. Generate a one-time pairing code;
 6. Message your bot in a private Telegram chat with `/pair 123456`.
 
@@ -110,16 +110,14 @@ When a project is added, CodexRelay performs a minimal access preflight immediat
 
 ## Telegram commands
 
-For daily use, remember these four commands:
+For daily use, remember these commands:
 
 ```text
-/projects       List projects
-/use 1          Select a project
-/sessions       List conversations in the project
+/sessions       List all conversations
 /session 1      Select a conversation
 ```
 
-After selecting a project and conversation, send ordinary text to run a task. Use `/new` when you need a fresh context; use `/stop` when you need to stop a running task.
+After selecting a conversation, send ordinary text to run a task. A conversation may have a project association or remain unassigned. Use `/new` when you need a fresh context; use `/stop` when you need to stop a running task.
 
 Full command reference:
 
@@ -128,12 +126,14 @@ Full command reference:
 /pair 123456
  Pair a Telegram account for first-time setup
 /projects
+ List project associations (compatibility command)
 /use 1
 /use CodexRelay
+ Select a project context (compatibility command; prefer `/session`)
 /new
- Create a new conversation for the current project
+ Create a new conversation in the current conversation's working directory
 /sessions
- List conversations for the current project
+ List all discovered Codex conversations, including unassigned sessions
 /session <number>
  Switch the current conversation
 /models
@@ -149,11 +149,11 @@ Full command reference:
  Show hand-off information (compatibility command; no manual takeover)
 ```
 
-`/help` groups commands into daily actions, task control, configuration and security, and first-time setup. Before pairing, only `/pair <six-digit code>` is accepted (the BotFather deep-link form `/start pair_<six-digit code>` is also supported); a paired account that sends `/pair` again receives a status message instead of accidentally submitting a Codex task. `/security` shows and changes the current project's approval mode; `/approval` is accepted as a compatibility alias. `/reasoning` changes the reasoning effort; `/effort` is accepted as a compatibility alias. Safe mode asks for each elevated operation in Telegram. “Auto-allow within this project” requires a second confirmation and only accepts operations that remain inside the current project directory; network and out-of-project requests still cannot be silently approved. It is disabled again after switching projects or pairing a different Telegram account. This setting is stored in CodexRelay's local database and does not modify `~/.codex/config.toml`.
+`/help` groups commands into conversation actions, task control, configuration and security, and first-time setup. Project management commands remain accepted as compatibility commands, but project management belongs in the Mac app's **System** page and selecting a conversation should use `/sessions` and `/session`. Before pairing, only `/pair <six-digit code>` is accepted (the BotFather deep-link form `/start pair_<six-digit code>` is also supported); a paired account that sends `/pair` again receives a status message instead of accidentally submitting a Codex task. `/security` shows the current conversation's approval mode; project conversations may opt into “auto-allow within this project” after a second confirmation, while unassigned conversations remain usable and use controlled safe mode for risky operations. `/reasoning` changes the reasoning effort; `/effort` is accepted as a compatibility alias. Settings are stored in CodexRelay's local database and do not modify `~/.codex/config.toml`.
 
-Project switching is allowed only after the current task finishes. To switch immediately, send `/stop` first, then `/use`. Switching projects does not clear the previous project's conversation.
+Project switching is allowed only after the current task finishes. `/use` remains a compatibility command for older workflows; the primary flow is to choose a conversation with `/sessions` and `/session`. Switching a project association does not delete conversation history.
 
-A project can contain multiple conversations. Use `/sessions` to list both Telegram-created conversations and conversations created on the computer, `/session <number>` to select one, and `/new` to create one. Startup, periodic background sync, and each `/sessions` request reconcile the list. When a conversation is deleted or archived in Codex, the next successful sync hides it from Telegram. If the currently selected conversation becomes invalid, CodexRelay selects the first still-valid conversation; if none remain, it returns to an unselected state. Local history is retained for audit and possible recovery rather than permanently deleted. If it is later restored in Codex, Telegram restores the same conversation by thread ID without creating a duplicate. If a project directory was moved, a matching computer-created thread is shown with a clear unavailable-path note; selecting it resumes the original context using the current project path. The source label describes where the conversation was created, while the occupancy label is only a short-lived indicator for the currently running turn. Telegram releases that indicator automatically when a task finishes, so returning to the computer requires no manual hand-off. Conversation context is isolated, and model/reasoning settings follow each conversation. `/release` remains available to clear an abnormal stale state; `/takeover` is retained as a compatibility command and does not create a permanent lock. Unknown slash commands are rejected explicitly instead of being sent as Codex tasks.
+Conversations are the primary object and may optionally belong to a project. Use `/sessions` to list every discovered Codex conversation grouped by project and unassigned status, `/session <number>` to select one, and `/new` to create one in the current working directory. The Mac app provides the same global Sessions page. Startup, periodic background sync, and each session-list request reconcile the list. When a conversation is deleted or archived in Codex, the next successful sync hides it from active views while retaining local history; if the current conversation disappears, the first still-valid conversation is selected automatically. Unassigned conversations can be selected and executed directly, but use controlled safe mode and request approval for risky operations. Telegram releases its short-lived task occupancy automatically when a task finishes, so returning to the computer requires no manual hand-off. Conversation context is isolated, and model/reasoning settings follow each conversation. `/use` remains a project-selection compatibility command; `/release` clears an abnormal stale state; `/takeover` is retained for compatibility. Unknown slash commands are rejected explicitly instead of being sent as Codex tasks.
 
 ## Models and reasoning effort
 
@@ -165,7 +165,7 @@ Choose the model and reasoning effort on the Mac app's **Codex** page or from Te
 /reasoning high
 ```
 
-Settings are stored in CodexRelay's own SQLite database and apply only to the current project's session. They do not change the global defaults used by Codex CLI, the Codex desktop app, or other projects.
+Settings are stored in CodexRelay's own SQLite database and apply only to the selected conversation. They do not change the global defaults used by Codex CLI, the Codex desktop app, or other conversations.
 
 ## Local data
 

@@ -5,12 +5,15 @@ from pathlib import Path
 
 import pytest
 
+from codexrelay.codex.base import DesktopThread
 from codexrelay.database import (
     MIGRATION_1,
     MIGRATION_2,
     MIGRATION_3,
     MIGRATION_5,
     MIGRATION_6,
+    MIGRATION_7,
+    SCHEMA_VERSION,
     Database,
 )
 from codexrelay.models import JobStatus
@@ -186,6 +189,222 @@ async def test_reconciliation_never_archives_a_conversation_with_an_active_job(
         archived = await database.conversation(conversation.id)
         assert archived is not None and archived.archived_at is not None
         assert await database.current_conversation(project.id) is None
+
+
+@pytest.mark.asyncio
+async def test_global_execution_slot_rejects_a_second_queued_job(tmp_path: Path) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    async with Database(tmp_path / "state.db") as database:
+        project = await database.add_project(project_path)
+        conversation = await database.get_or_create_active_conversation(project.id)
+        first_job, _message = await database.create_queued_job_with_input(
+            conversation_id=conversation.id,
+            text="first",
+        )
+        await database.mark_job_starting(first_job)
+
+        with pytest.raises(RuntimeError, match="全局已有任务运行"):
+            await database.create_queued_job_with_input(
+                conversation_id=conversation.id,
+                text="second",
+            )
+
+
+@pytest.mark.asyncio
+async def test_global_session_index_classifies_unassigned_and_supports_explicit_assignment(
+    tmp_path: Path,
+) -> None:
+    project_path = tmp_path / "project"
+    other_path = tmp_path / "other"
+    project_path.mkdir()
+    other_path.mkdir()
+    async with Database(tmp_path / "state.db") as database:
+        project = await database.add_project(project_path, "Project")
+        threads = [
+            DesktopThread("project-thread", "Project session", project_path, updated_at=2),
+            DesktopThread("other-thread", "Other session", other_path, updated_at=1),
+        ]
+
+        await database.reconcile_global_threads(threads)
+        sessions = await database.list_global_sessions()
+        assert [session.thread_id for session in sessions] == [
+            "project-thread",
+            "other-thread",
+        ]
+        project_session = sessions[0]
+        unassigned = sessions[1]
+        assert project_session.project_id == project.id
+        assert project_session.is_unassigned is False
+        assert unassigned.project_id is None
+        assert unassigned.is_unassigned
+
+        assigned = await database.assign_global_session("other-thread", project.id)
+        assert assigned.codex_thread_id == "other-thread"
+        sessions = await database.list_global_sessions()
+        assigned_view = next(item for item in sessions if item.thread_id == "other-thread")
+        assert assigned_view.project_id == project.id
+        assert assigned_view.conversation_id == assigned.id
+
+        activated = await database.activate_global_session("other-thread")
+        assert activated.id == assigned.id
+        current_project = await database.current_project()
+        assert current_project is not None and current_project.id == project.id
+        current = await database.current_conversation(project.id)
+        assert current is not None and current.id == assigned.id
+
+
+@pytest.mark.asyncio
+async def test_assigning_unassigned_session_rebinds_same_conversation_history(
+    tmp_path: Path,
+) -> None:
+    session_path = tmp_path / "loose"
+    project_path = tmp_path / "project"
+    session_path.mkdir()
+    project_path.mkdir()
+    async with Database(tmp_path / "state.db") as database:
+        project = await database.add_project(project_path, "Project")
+        await database.reconcile_global_threads(
+            [DesktopThread("thread-1", "Loose work", session_path, updated_at=1)]
+        )
+        before = await database.current_global_conversation()
+        assert before is not None and before.project_id is None
+        await database.set_conversation_model(
+            before.id, model="gpt-test", reasoning_effort="high"
+        )
+        job_id, _message = await database.create_queued_job_with_input(
+            conversation_id=before.id,
+            text="preserve this context",
+        )
+        await database.mark_job_starting(job_id)
+        await database.mark_job_interrupted(job_id)
+
+        assigned = await database.assign_global_session("thread-1", project.id)
+        after = await database.current_global_conversation()
+
+        assert assigned.id == before.id
+        assert after is not None and after.id == before.id
+        assert after.project_id == project.id
+        assert after.model == "gpt-test"
+        assert after.reasoning_effort == "high"
+        cursor = await database.connection.execute(
+            "SELECT content_text FROM conversation_messages "
+            "WHERE conversation_id=? ORDER BY created_at",
+            (before.id,),
+        )
+        messages = await cursor.fetchall()
+        assert [str(item["content_text"]) for item in messages] == [
+            "preserve this context"
+        ]
+        assert len(await database.list_all_conversations()) == 1
+
+
+@pytest.mark.asyncio
+async def test_global_session_index_keeps_disabled_project_classification(
+    tmp_path: Path,
+) -> None:
+    project_path = tmp_path / "disabled-project"
+    project_path.mkdir()
+    async with Database(tmp_path / "state.db") as database:
+        project = await database.add_project(project_path, "Disabled")
+        await database.connection.execute(
+            "UPDATE projects SET enabled=0 WHERE id=?", (project.id,)
+        )
+        await database.connection.commit()
+
+        await database.reconcile_global_threads(
+            [DesktopThread("disabled-thread", "Saved task", project_path, updated_at=1)]
+        )
+        session = (await database.list_global_sessions())[0]
+
+        assert session.project_id == project.id
+        assert session.project_name == "Disabled"
+        assert not session.project_enabled
+        assert not session.is_unassigned
+
+
+@pytest.mark.asyncio
+async def test_adding_project_does_not_override_selected_unassigned_session(
+    tmp_path: Path,
+) -> None:
+    session_path = tmp_path / "notes"
+    project_path = tmp_path / "project"
+    session_path.mkdir()
+    project_path.mkdir()
+    async with Database(tmp_path / "state.db") as database:
+        await database.reconcile_global_threads(
+            [DesktopThread("loose-thread", "Loose", session_path, updated_at=1)]
+        )
+        current = await database.current_global_conversation()
+        assert current is not None and current.project_id is None
+
+        await database.add_project(project_path, "Project")
+
+        selected = await database.current_global_conversation()
+        assert selected is not None and selected.id == current.id
+        assert selected.project_id is None
+
+
+@pytest.mark.asyncio
+async def test_explicit_standalone_session_is_not_auto_assigned_by_cwd(
+    tmp_path: Path,
+) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    async with Database(tmp_path / "state.db") as database:
+        project = await database.add_project(project_path, "Project")
+        standalone = await database.create_standalone_conversation(
+            project_path, title="Temporary work"
+        )
+        await database.connection.execute(
+            "UPDATE conversations SET codex_thread_id=? WHERE id=?",
+            ("standalone-thread", standalone.id),
+        )
+        await database.connection.commit()
+
+        await database.reconcile_global_threads(
+            [DesktopThread("standalone-thread", "Temporary work", project_path, updated_at=1)]
+        )
+        current = await database.current_global_conversation()
+        session = (await database.list_global_sessions())[0]
+
+        assert current is not None and current.id == standalone.id
+        assert current.project_id is None
+        assert session.project_id is None
+        assert session.is_unassigned
+        assert project.id != session.project_id
+
+
+@pytest.mark.asyncio
+async def test_project_binding_keeps_execution_cwd_inside_authorized_root(
+    tmp_path: Path,
+) -> None:
+    project_path = tmp_path / "project"
+    external_path = tmp_path / "external"
+    project_path.mkdir()
+    external_path.mkdir()
+    async with Database(tmp_path / "state.db") as database:
+        project = await database.add_project(project_path, "Project")
+        thread = DesktopThread(
+            "external-thread",
+            "External session",
+            external_path,
+            updated_at=1,
+        )
+
+        await database.reconcile_global_threads([thread])
+        assigned = await database.assign_global_session(thread.thread_id, project.id)
+        assert assigned.cwd == project_path.resolve()
+
+        await database.reconcile_global_threads([thread])
+        refreshed = await database.conversation(assigned.id)
+        discovered = (await database.list_global_sessions())[0]
+
+        assert refreshed is not None
+        assert refreshed.project_id == project.id
+        assert refreshed.cwd == project_path.resolve()
+        assert discovered.project_id == project.id
+        assert discovered.cwd == external_path.resolve()
 
 
 @pytest.mark.asyncio
@@ -405,7 +624,7 @@ async def test_schema_v3_migrates_model_settings_without_losing_conversations(
         conversation = await database.conversation("conversation-1")
 
         assert {"model", "reasoning_effort"} <= columns
-        assert version is not None and version["version"] == 7
+        assert version is not None and version["version"] == 9
         assert conversation is not None
         assert conversation.codex_thread_id == "thread-1"
         assert conversation.model is None
@@ -445,6 +664,42 @@ async def test_schema_v6_migration_backfills_current_conversation(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_schema_v7_adds_global_discovered_thread_index(tmp_path: Path) -> None:
+    database_path = tmp_path / "state.db"
+    raw = sqlite3.connect(database_path)
+    try:
+        raw.executescript(MIGRATION_1)
+        raw.executescript(MIGRATION_2)
+        raw.executescript(MIGRATION_3)
+        raw.execute("ALTER TABLE conversations ADD COLUMN model TEXT NULL")
+        raw.execute("ALTER TABLE conversations ADD COLUMN reasoning_effort TEXT NULL")
+        raw.executescript(MIGRATION_5)
+        raw.executescript(MIGRATION_6)
+        raw.executescript(MIGRATION_7)
+        raw.execute("DELETE FROM schema_version")
+        raw.execute("INSERT INTO schema_version(version) VALUES (7)")
+        raw.commit()
+    finally:
+        raw.close()
+    async with Database(database_path) as database:
+        cursor = await database.connection.execute("PRAGMA table_info(discovered_threads)")
+        columns = {str(row["name"]) for row in await cursor.fetchall()}
+        version_cursor = await database.connection.execute(
+            "SELECT MAX(version) AS version FROM schema_version"
+        )
+        version = await version_cursor.fetchone()
+
+    assert {
+        "codex_thread_id",
+        "cwd",
+        "project_id",
+        "conversation_id",
+        "archived_at",
+    } <= columns
+    assert version is not None and version["version"] == 9
+
+
+@pytest.mark.asyncio
 async def test_partial_schema_v6_migration_is_resumed_without_duplicate_column_error(
     tmp_path: Path,
 ) -> None:
@@ -477,3 +732,22 @@ async def test_partial_schema_v6_migration_is_resumed_without_duplicate_column_e
             "archived_at",
             "lock_owner",
         } <= columns
+
+
+@pytest.mark.asyncio
+async def test_concurrent_database_open_serializes_schema_migration(tmp_path: Path) -> None:
+    database_path = tmp_path / "concurrent.db"
+    databases = [Database(database_path) for _ in range(4)]
+
+    await asyncio.gather(*(database.open() for database in databases))
+    try:
+        versions = []
+        for database in databases:
+            cursor = await database.connection.execute(
+                "SELECT MAX(version) AS version FROM schema_version"
+            )
+            row = await cursor.fetchone()
+            versions.append(None if row is None else row["version"])
+        assert versions == [SCHEMA_VERSION] * len(databases)
+    finally:
+        await asyncio.gather(*(database.close() for database in databases))

@@ -2,7 +2,27 @@
 
 ## Unreleased / 未发布
 
-Changes will be recorded here. / 后续变更将在这里记录。
+### Global session view / 全局会话视图
+
+- Added a global Codex session index with project, unassigned, unavailable-path, and recoverable archival states;
+- Made `/sessions` the global conversation view; `/sessions all` remains accepted as a compatibility spelling;
+- Added a dedicated Mac Sessions page with filters, on-demand synchronization, explicit assignment to an authorized project, and safe session activation;
+- Unassigned sessions can be selected and executed directly in controlled safe mode; project association remains explicit and optional.
+- Moved project management into the Mac System page and removed project selection from Telegram's primary command menu; `/projects` and `/use` remain compatibility commands.
+- Preserved one canonical conversation row when an unassigned session is explicitly assigned to a project, so its history and per-session model settings remain continuous.
+- Enforced the global single-task slot at the persistence boundary, including queued work, and made newly created Codex threads appear in the global session view immediately.
+- Redesigned the System page as a compact macOS-style settings view, replacing the oversized project list with a readable project selector and independent separators.
+- Changed long session titles from seamless marquee scrolling to round-based playback: scroll to the end, pause, then restart from the beginning.
+
+- 增加全局 Codex 会话索引，区分项目、未归属、路径不可用和可恢复归档状态；
+- Telegram 将 `/sessions` 统一为全局会话视图，同时兼容接受 `/sessions all`；
+- Mac App 增加独立“会话”页面，支持筛选、即时同步、显式归属到已授权项目和安全切换会话；
+- 无项目会话可以直接选择和执行，风险权限仍通过受控安全模式审批；项目归属保持显式且可选。
+- 将项目管理收归 Mac 端“系统”页面，并从 Telegram 原生命令菜单移除项目选择；`/projects` 和 `/use` 作为兼容命令保留。
+- 无项目会话明确归属项目时复用同一条会话记录，保留历史消息以及每会话模型设置，避免上下文分叉。
+- 在持久化边界统一执行全局单任务限制（包括排队状态），新创建的 Codex thread 会立即出现在全局会话视图中。
+- 将“系统”页面重构为紧凑的 macOS 设置风格，用清晰的项目选择器替代过大的项目列表，并将分隔线独立处理，避免与按钮重叠。
+- 将超长会话标题从首尾无缝滚动改为分轮播放：滚动到末尾后暂停，再从开头重新播放。
 
 ## 0.1.2 - 2026-09-04
 

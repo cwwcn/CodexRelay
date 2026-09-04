@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, cast
 
 from codexrelay.codex.base import CodexBackend, ProgressCallback
 from codexrelay.database import Database
+from codexrelay.models import ProjectApprovalMode
 from codexrelay.projects import ProjectService
 from codexrelay.sleep import SleepInhibitor
 
@@ -47,11 +49,16 @@ class RelayService:
         delivery: DeliveryTarget | None = None,
         on_progress: ProgressCallback | None = None,
     ) -> RelayResult:
-        project = await self.database.current_project()
-        if project is None:
-            raise RuntimeError("no current project is configured")
-        return await self.run_project(
-            project_id=project.id,
+        conversation = await self.database.current_global_conversation()
+        if conversation is None:
+            project = await self.database.current_project()
+            if project is None:
+                raise RuntimeError("no current conversation is configured")
+            conversation = await self.database.get_or_create_active_conversation(
+                project.id, title=project.name
+            )
+        return await self.run_conversation(
+            conversation_id=conversation.id,
             text=text,
             image_paths=image_paths,
             inbound_event_id=inbound_event_id,
@@ -59,38 +66,59 @@ class RelayService:
             on_progress=on_progress,
         )
 
-    async def run_project(
+    async def run_current_conversation(
         self,
         *,
-        project_id: str,
         text: str,
         image_paths: tuple[Path, ...] = (),
         inbound_event_id: str | None = None,
         delivery: DeliveryTarget | None = None,
         on_progress: ProgressCallback | None = None,
     ) -> RelayResult:
-        """Run against the explicitly selected project.
-
-        The explicit ``project_id`` keeps the turn and its persisted conversation
-        bound to one project. Telegram rejects /use while a turn is active.
-        """
-        project = await self.database.get_project(project_id)
-        if project is None or not project.enabled:
-            raise RuntimeError("the selected project is no longer available")
-        # Fail before creating a job or starting Codex if macOS TCC access has
-        # disappeared. This prevents a permission prompt from interrupting a
-        # remotely initiated task halfway through execution.
-        ProjectService.preflight_access(project.path)
-        conversation = await self.database.get_or_create_active_conversation(
-            project.id, title=project.name
+        return await self.run_current_project(
+            text=text,
+            image_paths=image_paths,
+            inbound_event_id=inbound_event_id,
+            delivery=delivery,
+            on_progress=on_progress,
         )
+
+    async def run_conversation(
+        self,
+        *,
+        conversation_id: str,
+        text: str,
+        image_paths: tuple[Path, ...] = (),
+        inbound_event_id: str | None = None,
+        delivery: DeliveryTarget | None = None,
+        on_progress: ProgressCallback | None = None,
+    ) -> RelayResult:
+        conversation = await self.database.conversation(conversation_id)
+        if conversation is None or conversation.archived_at is not None:
+            raise RuntimeError("the selected conversation is no longer available")
+        project = (
+            await self.database.get_project(conversation.project_id)
+            if conversation.project_id is not None
+            else None
+        )
+        if project is not None and not project.enabled:
+            raise RuntimeError("the selected conversation's project is disabled")
+        cwd = conversation.cwd
+        if cwd is None and project is not None:
+            cwd = project.path
+        if cwd is None:
+            raise RuntimeError("the selected conversation has no working directory")
+        if project is not None:
+            ProjectService.preflight_access(project.path)
+        else:
+            ProjectService.preflight_access(cwd)
         preflight_thread = getattr(self.backend, "preflight_thread", None)
         if conversation.codex_thread_id is not None and callable(preflight_thread):
             await preflight_thread(
-                project=project.path,
+                project=cwd,
                 thread_id=conversation.codex_thread_id,
                 model=conversation.model,
-                approval_mode=await self.database.project_approval_mode(project.id),
+                approval_mode=ProjectApprovalMode.SAFE,
             )
         job_id, _message = await self.database.create_queued_job_with_input(
             conversation_id=conversation.id,
@@ -103,68 +131,38 @@ class RelayService:
             await self.database.fail_job(job_id, "conversation_disappeared")
             raise RuntimeError("conversation disappeared before Codex execution")
         owner = delivery.connector_type if delivery is not None else "local"
-        # Conversation leases are deliberately turn-scoped. Telegram should
-        # hand the session back to the desktop naturally after each response;
-        # a prior `/use`, `/new`, or `/session` must never leave a permanent
-        # Telegram ownership marker behind.
         try:
             await self.database.acquire_conversation_lock(conversation.id, owner)
         except BaseException as error:
             await self.database.fail_job(job_id, type(error).__name__)
             raise
-        project_approval_mode = await self.database.project_approval_mode(project.id)
+        project_approval_mode = (
+            await self.database.project_approval_mode(project.id)
+            if project is not None
+            else ProjectApprovalMode.SAFE
+        )
 
         async def on_turn_started(thread_id: str, turn_id: str) -> None:
             await self.database.mark_turn_started(job_id, thread_id, turn_id)
 
         try:
             async with self.sleep_inhibitor.lease():
+                turn_kwargs = dict(
+                    project=cwd,
+                    text=text,
+                    image_paths=image_paths,
+                    thread_id=execution_conversation.codex_thread_id,
+                    model=execution_conversation.model,
+                    reasoning_effort=execution_conversation.reasoning_effort,
+                    on_turn_started=on_turn_started,
+                )
+                if project_approval_mode is not ProjectApprovalMode.SAFE:
+                    turn_kwargs["approval_mode"] = project_approval_mode
                 if on_progress is None:
-                    if project_approval_mode.value == "safe":
-                        result = await self.backend.run_turn(
-                            project=project.path,
-                            text=text,
-                            image_paths=image_paths,
-                            thread_id=execution_conversation.codex_thread_id,
-                            model=execution_conversation.model,
-                            reasoning_effort=execution_conversation.reasoning_effort,
-                            on_turn_started=on_turn_started,
-                        )
-                    else:
-                        result = await self.backend.run_turn(
-                            project=project.path,
-                            text=text,
-                            image_paths=image_paths,
-                            thread_id=execution_conversation.codex_thread_id,
-                            model=execution_conversation.model,
-                            reasoning_effort=execution_conversation.reasoning_effort,
-                            approval_mode=project_approval_mode,
-                            on_turn_started=on_turn_started,
-                        )
+                    result = await cast(Any, self.backend).run_turn(**turn_kwargs)
                 else:
-                    if project_approval_mode.value == "safe":
-                        result = await self.backend.run_turn(
-                            project=project.path,
-                            text=text,
-                            image_paths=image_paths,
-                            thread_id=execution_conversation.codex_thread_id,
-                            model=execution_conversation.model,
-                            reasoning_effort=execution_conversation.reasoning_effort,
-                            on_turn_started=on_turn_started,
-                            on_progress=on_progress,
-                        )
-                    else:
-                        result = await self.backend.run_turn(
-                            project=project.path,
-                            text=text,
-                            image_paths=image_paths,
-                            thread_id=execution_conversation.codex_thread_id,
-                            model=execution_conversation.model,
-                            reasoning_effort=execution_conversation.reasoning_effort,
-                            approval_mode=project_approval_mode,
-                            on_turn_started=on_turn_started,
-                            on_progress=on_progress,
-                        )
+                    turn_kwargs["on_progress"] = on_progress
+                    result = await cast(Any, self.backend).run_turn(**turn_kwargs)
             final_text = result.final_text if result.final_text.strip() else "任务已完成。"
             canonical_message_id = await self.database.complete_job(job_id, final_text)
             outbound_id = None
@@ -187,6 +185,32 @@ class RelayService:
             turn_id=result.turn_id,
             final_text=final_text,
             outbound_id=outbound_id,
+        )
+
+    async def run_project(
+        self,
+        *,
+        project_id: str,
+        text: str,
+        image_paths: tuple[Path, ...] = (),
+        inbound_event_id: str | None = None,
+        delivery: DeliveryTarget | None = None,
+        on_progress: ProgressCallback | None = None,
+    ) -> RelayResult:
+        """Backward-compatible project entry point."""
+        project = await self.database.get_project(project_id)
+        if project is None or not project.enabled:
+            raise RuntimeError("the selected project is no longer available")
+        conversation = await self.database.get_or_create_active_conversation(
+            project.id, title=project.name
+        )
+        return await self.run_conversation(
+            conversation_id=conversation.id,
+            text=text,
+            image_paths=image_paths,
+            inbound_event_id=inbound_event_id,
+            delivery=delivery,
+            on_progress=on_progress,
         )
 
     async def interrupt_active(self) -> bool:

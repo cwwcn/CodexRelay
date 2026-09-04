@@ -28,6 +28,7 @@ from codexrelay.database import Database
 from codexrelay.models import Conversation, JobStatus, Project, ProjectApprovalMode
 from codexrelay.pairing import PairingError, PairingService
 from codexrelay.projects import ProjectService
+from codexrelay.session_sync import SessionSynchronizer
 
 PAIR_PATTERN = re.compile(r"^/(?:pair\s+|start\s+pair_)(\d{6})$")
 
@@ -135,18 +136,26 @@ class TelegramRouter:
         if command == "/projects":
             projects = await self.project_service.list_projects()
             if not projects:
-                await self._reply(message, "Mac端尚未添加授权项目。")
+                await self._reply(message, "Mac 端‘系统’页尚未添加授权项目。")
                 return
             lines = [
                 f"{'●' if project.is_current else '○'} {index}. {project.name}\n   {project.path}"
                 for index, project in enumerate(projects, start=1)
             ]
-            await self._reply(message, "可用项目：\n" + "\n".join(lines))
+            await self._reply(
+                message,
+                "已登记项目（项目是会话的可选归属）：\n"
+                + "\n".join(lines)
+                + "\n\n项目管理请在 Mac 端‘系统’页完成；切换会话请使用 /sessions 和 /session。",
+            )
             return
         if command == "/use":
             selector = argument.strip()
             if not selector:
-                await self._reply(message, "用法：/use <项目编号或名称>")
+                await self._reply(
+                    message,
+                    "用法：/use <项目编号或名称>（兼容命令；推荐使用 /session <会话编号>）",
+                )
                 return
             if self._job_lock.locked():
                 await self._reply(
@@ -158,13 +167,11 @@ class TelegramRouter:
                 projects = await self.project_service.list_projects()
                 if selector.isdigit() and 1 <= int(selector) <= len(projects):
                     selector = projects[int(selector) - 1].id
-                previous_project = await self.database.current_project()
-                if previous_project is not None:
-                    previous_session = await self.database.current_conversation(previous_project.id)
-                    if previous_session is not None:
-                        await self.database.release_conversation_lock(
-                            previous_session.id, "telegram"
-                        )
+                previous_session = await self.database.current_global_conversation()
+                if previous_session is not None:
+                    await self.database.release_conversation_lock(
+                        previous_session.id, "telegram"
+                    )
                 try:
                     selected = await self.project_service.switch(selector)
                 except (ValueError, RuntimeError) as error:
@@ -172,7 +179,8 @@ class TelegramRouter:
                     return
             await self._reply(
                 message,
-                f"已切换到：{selected.name}\n{selected.path}",
+                f"已切换兼容项目上下文：{selected.name}\n{selected.path}\n"
+                "项目只是会话的可选归属；如需精确选择上下文，请发送 /sessions。",
             )
             self._security_confirmations.clear()
             return
@@ -180,115 +188,78 @@ class TelegramRouter:
             if await self.database.active_job_count():
                 await self._reply(message, "任务运行期间不能新建对话。")
                 return
-            project = await self.database.current_project()
-            if project is None:
-                await self._reply(message, "当前没有可用项目。")
+            current = await self.database.current_global_conversation()
+            if current is None:
+                project = await self.database.current_project()
+                if project is None:
+                    await self._reply(
+                        message,
+                        "当前没有会话工作目录，请先在 Mac 端选择或创建一个会话。",
+                    )
+                    return
+                current = await self.database.get_or_create_active_conversation(
+                    project.id, title=project.name
+                )
+            if current.cwd is None:
+                await self._reply(message, "当前会话没有可用工作目录，无法新建会话。")
                 return
-            await self.database.start_new_conversation(project.id, project.name)
-            await self._reply(message, f"已为 {project.name} 新建Codex对话。")
+            if current.project_id is not None:
+                created = await self.database.start_new_conversation(
+                    current.project_id, current.title
+                )
+            else:
+                created = await self.database.create_standalone_conversation(
+                    current.cwd, title="临时会话"
+                )
+            await self._reply(message, f"已新建会话：{created.title}\n工作目录：{created.cwd}")
             return
         if command == "/sessions":
-            project = await self.database.current_project()
-            if project is None:
-                await self._reply(message, "当前没有可用项目。")
+            if argument and argument.casefold() != "all":
+                await self._reply(message, "用法：/sessions（查看全部会话）")
                 return
-            discovery_note = ""
-            if self.codex_backend is not None and not await self.database.active_job_count():
-                try:
-                    desktop_threads = await self.codex_backend.list_project_threads(project.path)
-                    await self.database.archive_missing_codex_conversations(
-                        project.id,
-                        {thread.thread_id for thread in desktop_threads},
-                    )
-                    for thread in desktop_threads:
-                        await self.database.register_external_conversation(
-                            project.id,
-                            codex_thread_id=thread.thread_id,
-                            title=thread.title,
-                            source=thread.source,
-                        )
-                    await self.database.select_first_available_conversation(project.id)
-                except Exception:
-                    # Discovery is best-effort; a temporary SDK/store failure
-                    # must not hide persisted Telegram conversations.
-                    discovery_note = "\n（电脑端会话暂时无法同步，请稍后重试。）"
-            # A conversation without a Codex thread is only the local Telegram
-            # placeholder created before its first task runs. It is not a
-            # selectable Codex session and must not inflate the list shown to
-            # the user. Keep the numbering identical between /sessions and
-            # /session <number>.
-            sessions = self._selectable_sessions(
-                await self.database.list_conversations(project.id)
-            )
-            current = await self.database.current_conversation(project.id)
-            if not sessions:
-                await self._reply(message, "当前项目还没有会话。")
-                return
-            lines = []
-            for index, session in enumerate(sessions, start=1):
-                marker = "●" if current is not None and session.id == current.id else "○"
-                source_label = {
-                    "telegram": "Telegram",
-                    "desktop": "电脑端会话",
-                    "desktop_migrated": "电脑端相关会话",
-                    "other": "其他连接器创建",
-                }.get(session.source, "未知来源")
-                current_label = " · 当前" if marker == "●" else ""
-                lock_label = (
-                    " · Telegram占用"
-                    if session.lock_owner == "telegram"
-                    else (f" · {session.lock_owner}占用" if session.lock_owner else "")
-                )
-                lines.append(
-                    f"{marker} {index}. {session.title} · {source_label}"
-                    f"{current_label}{lock_label}"
-                )
-            await self._reply(
-                message,
-                f"当前项目会话（{len(sessions)}）：\n" + "\n".join(lines)
-                + "\n使用 /session <会话编号> 切换。"
-                + "\n电脑端会话可直接继续；也可使用 /new 创建 Telegram 会话。"
-                + discovery_note,
-            )
+            await self._handle_all_sessions(message)
             return
         if command == "/session":
             selector = argument.strip()
-            project = await self.database.current_project()
-            if project is None:
-                await self._reply(message, "当前没有可用项目。")
-                return
             if not selector.isdigit():
                 await self._reply(message, "用法：/session <会话编号>，发送 /sessions 查看列表。")
                 return
             if self._job_lock.locked() or await self.database.active_job_count():
                 await self._reply(message, "任务运行期间不能切换会话，请等待完成或先使用 /stop。")
                 return
-            sessions = self._selectable_sessions(
-                await self.database.list_conversations(project.id)
-            )
+            if self.codex_backend is not None:
+                try:
+                    await SessionSynchronizer(self.database, self.codex_backend).sync_all()
+                except Exception:
+                    pass
+            sessions = await self.database.list_global_sessions()
             index = int(selector) - 1
             if index < 0 or index >= len(sessions):
-                await self._reply(message, "未找到该会话编号，请发送 /sessions 查看列表。")
+                await self._reply(message, "未找到该会话编号，请发送 /sessions 查看最新列表。")
                 return
-            selected_id = sessions[index].id
-            current_session = await self.database.current_conversation(project.id)
-            if current_session is not None and current_session.id != selected_id:
-                await self.database.release_conversation_lock(current_session.id, "telegram")
-            selected_session = await self.database.select_conversation(selected_id, project.id)
+            selected_global = sessions[index]
+            try:
+                selected_session = await self.database.activate_global_session(
+                    selected_global.thread_id
+                )
+            except RuntimeError as error:
+                await self._reply(message, f"切换失败：{error}")
+                return
             self._security_confirmations.clear()
             await self._reply(
                 message,
                 f"已切换会话：{selected_session.title}\n"
-                f"来源：{self._conversation_source_label(selected_session.source)}",
+                f"归属：{selected_global.project_name or '无项目'}\n"
+                f"工作目录：{selected_session.cwd or '不可用'}",
             )
             return
         if command == "/models":
             state = await self._current_model_state()
             if state is None:
-                await self._reply(message, "当前没有可用项目，或Codex模型清单尚未就绪。")
+                await self._reply(message, "当前没有可用会话，或Codex模型清单尚未就绪。")
                 return
             assert self.model_catalog is not None
-            project, _conversation, model_option, effort = state
+            _project, conversation, model_option, effort = state
             lines = [
                 f"{'●' if option.model == model_option.model else '○'} {index}. "
                 f"{option.display_name} ({option.model})"
@@ -296,7 +267,8 @@ class TelegramRouter:
             ]
             await self._reply(
                 message,
-                f"{project.name} 当前会话的可用模型：\n"
+                f"当前会话：{conversation.title}\n"
+                f"可用模型：\n"
                 + "\n".join(lines)
                 + f"\n当前推理强度：{reasoning_effort_label(effort)} ({effort})",
             )
@@ -304,10 +276,10 @@ class TelegramRouter:
         if command == "/model":
             state = await self._current_model_state()
             if state is None:
-                await self._reply(message, "当前没有可用项目，或Codex模型清单尚未就绪。")
+                await self._reply(message, "当前没有可用会话，或Codex模型清单尚未就绪。")
                 return
             assert self.model_catalog is not None
-            project, _conversation, model_option, effort = state
+            _project, conversation, model_option, effort = state
             selector = argument.strip()
             if not selector:
                 await self._reply(
@@ -328,18 +300,17 @@ class TelegramRouter:
             next_effort = effort if option.supports(effort) else option.default_reasoning_effort
             async with self._job_lock:
                 try:
-                    await self.database.set_active_conversation_model(
-                        project.id,
+                    await self.database.set_conversation_model(
+                        conversation.id,
                         model=option.model,
                         reasoning_effort=next_effort,
-                        title=project.name,
                     )
                 except RuntimeError as error:
                     await self._reply(message, f"修改失败：{error}")
                     return
             await self._reply(
                 message,
-                f"已为 {project.name} 当前会话选择：{option.display_name}\n"
+                f"已为当前会话选择：{option.display_name}\n"
                 f"推理强度：{reasoning_effort_label(next_effort)} ({next_effort})\n"
                 "既有上下文保持不变，从下一条任务开始生效。",
             )
@@ -347,9 +318,9 @@ class TelegramRouter:
         if command == "/reasoning":
             state = await self._current_model_state()
             if state is None:
-                await self._reply(message, "当前没有可用项目，或Codex模型清单尚未就绪。")
+                await self._reply(message, "当前没有可用会话，或Codex模型清单尚未就绪。")
                 return
-            project, _conversation, model_option, effort = state
+            _project, conversation, model_option, effort = state
             requested = argument.strip().casefold()
             choices = ", ".join(
                 f"{reasoning_effort_label(value)} ({value})"
@@ -371,44 +342,49 @@ class TelegramRouter:
                 return
             async with self._job_lock:
                 try:
-                    await self.database.set_active_conversation_model(
-                        project.id,
+                    await self.database.set_conversation_model(
+                        conversation.id,
                         model=model_option.model,
                         reasoning_effort=requested,
-                        title=project.name,
                     )
                 except RuntimeError as error:
                     await self._reply(message, f"修改失败：{error}")
                     return
             await self._reply(
                 message,
-                f"已将 {project.name} 当前会话的推理强度设为："
+                "已将当前会话的推理强度设为："
                 f"{reasoning_effort_label(requested)} ({requested})\n"
                 "既有上下文保持不变，从下一条任务开始生效。",
             )
             return
         if command == "/status":
-            project = await self.database.current_project()
             active_jobs = await self.database.active_job_count()
-            name = project.name if project is not None else "未选择"
+            status_conversation = await self.database.current_global_conversation()
+            project = (
+                await self.database.get_project(status_conversation.project_id)
+                if status_conversation is not None and status_conversation.project_id is not None
+                else None
+            )
+            name = project.name if project is not None else "无项目会话"
             conversation_status = "会话：未选择"
-            if project is not None:
-                conversation = await self.database.current_conversation(project.id)
-                if conversation is not None:
-                    lock = {
-                        None: "空闲",
-                        "telegram": "Telegram占用",
-                        "desktop": "电脑端占用",
-                    }.get(conversation.lock_owner, f"{conversation.lock_owner}占用")
-                    source_label = self._conversation_source_label(conversation.source)
-                    conversation_status = (
-                        f"会话：{conversation.title}\n"
-                        f"会话来源：{source_label}\n"
-                        f"会话状态：{lock}"
-                    )
+            if status_conversation is not None:
+                lock = {
+                    None: "空闲",
+                    "telegram": "Telegram占用",
+                    "desktop": "电脑端占用",
+                }.get(
+                    status_conversation.lock_owner,
+                    f"{status_conversation.lock_owner}占用",
+                )
+                source_label = self._conversation_source_label(status_conversation.source)
+                conversation_status = (
+                    f"会话：{status_conversation.title}\n"
+                    f"会话来源：{source_label}\n"
+                    f"会话状态：{lock}"
+                )
             running_project = await self.database.active_job_project()
             running_name = running_project.name if running_project is not None else None
-            approval_status = "审批模式：未选择项目"
+            approval_status = "审批模式：受控模式（无项目会话）"
             if project is not None:
                 approval_mode = await self.database.project_approval_mode(
                     project.id,
@@ -429,7 +405,8 @@ class TelegramRouter:
                     f"推理强度：{reasoning_effort_label(effort)} ({effort})"
                 )
             status_lines = [
-                f"当前项目：{name}",
+                f"会话归属：{name}"
+                + (f"\n当前项目：{name}" if project is not None else ""),
                 conversation_status,
                 model_status,
                 approval_status,
@@ -454,13 +431,9 @@ class TelegramRouter:
             await self._reply(message, reply)
             return
         if command == "/release":
-            project = await self.database.current_project()
-            if project is None:
-                await self._reply(message, "当前没有可用项目。")
-                return
-            conversation = await self.database.current_conversation(project.id)
-            if conversation is None:
-                await self._reply(message, "当前没有选中的会话。")
+            release_conversation = await self.database.current_global_conversation()
+            if release_conversation is None:
+                await self._reply(message, "当前没有选中的会话。请先发送 /sessions。")
                 return
             if await self.database.active_job_count():
                 await self._reply(message, "当前会话仍有任务运行，请先使用 /stop。")
@@ -475,7 +448,7 @@ class TelegramRouter:
                     await self._reply(message, f"清理异常状态失败：{error}")
                     return
             released = await self.database.release_conversation_lock(
-                conversation.id, "telegram"
+                release_conversation.id, "telegram"
             )
             await self._reply(
                 message,
@@ -485,17 +458,13 @@ class TelegramRouter:
             )
             return
         if command == "/takeover":
-            project = await self.database.current_project()
-            if project is None:
-                await self._reply(message, "当前没有可用项目。")
-                return
-            conversation = await self.database.current_conversation(project.id)
-            if conversation is None:
-                await self._reply(message, "当前没有选中的会话。")
+            takeover_conversation = await self.database.current_global_conversation()
+            if takeover_conversation is None:
+                await self._reply(message, "当前没有选中的会话。请先发送 /sessions。")
                 return
             await self._reply(
                 message,
-                f"Telegram 会话已就绪：{conversation.title}\n"
+                f"Telegram 会话已就绪：{takeover_conversation.title}\n"
                 "现在不需要手动接管；任务完成后，电脑端可直接继续。",
             )
             return
@@ -516,30 +485,53 @@ class TelegramRouter:
                         "系统没有自动重放；如需重试，请重新发送该任务。",
                     )
                 return
-            project = await self.database.current_project()
-            if project is None:
-                await self._reply(message, "当前没有可用项目。请先在Mac端添加项目。")
-                return
+            active_conversation = await self.database.current_global_conversation()
+            if active_conversation is None:
+                fallback_project = await self.database.current_project()
+                if fallback_project is None:
+                    await self._reply(
+                        message,
+                        "当前没有选中的会话。请先发送 /sessions 选择会话。",
+                    )
+                    return
+                active_conversation = await self.database.get_or_create_active_conversation(
+                    fallback_project.id, title=fallback_project.name
+                )
             images = await self._download_images(message)
             progress = TelegramProgress(self.client, message.external_conversation_id)
             await progress.start()
             try:
-                await self.relay.run_project(
-                    project_id=project.id,
-                    text=message.text,
-                    image_paths=images,
-                    inbound_event_id=event_id,
-                    delivery=DeliveryTarget(
-                        connector_type="telegram",
-                        account_id=message.account_id,
-                        external_conversation_id=message.external_conversation_id,
-                    ),
-                    on_progress=progress.update if progress.active else None,
+                delivery = DeliveryTarget(
+                    connector_type="telegram",
+                    account_id=message.account_id,
+                    external_conversation_id=message.external_conversation_id,
                 )
+                run_current = getattr(self.relay, "run_current_conversation", None)
+                if callable(run_current):
+                    await run_current(
+                        text=message.text,
+                        image_paths=images,
+                        inbound_event_id=event_id,
+                        delivery=delivery,
+                        on_progress=progress.update if progress.active else None,
+                    )
+                elif active_conversation.project_id is not None:
+                    # Compatibility for lightweight test/integration relays
+                    # that still expose only the original project entrypoint.
+                    await self.relay.run_project(
+                        project_id=active_conversation.project_id,
+                        text=message.text,
+                        image_paths=images,
+                        inbound_event_id=event_id,
+                        delivery=delivery,
+                        on_progress=progress.update if progress.active else None,
+                    )
+                else:
+                    raise RuntimeError("当前会话执行器尚未支持无项目会话")
             except PermissionError:
                 await self._reply(
                     message,
-                    "当前项目访问权限不可用。请在 Mac 端的‘系统设置 → 隐私与安全性’中允许 "
+                    "当前会话工作目录访问权限不可用。请在 Mac 端的‘系统设置 → 隐私与安全性’中允许 "
                     "CodexRelay 访问该目录后再试。",
                 )
             except Exception as error:
@@ -570,6 +562,46 @@ class TelegramRouter:
             command = "/" + TELEGRAM_COMMAND_ALIASES.get(name, name)
         argument = parts[1].strip() if len(parts) == 2 else ""
         return command, argument
+
+    async def _handle_all_sessions(self, message: IncomingMessage) -> None:
+        discovery_note = ""
+        if self.codex_backend is not None and not await self.database.active_job_count():
+            try:
+                await SessionSynchronizer(self.database, self.codex_backend).sync_all()
+            except Exception:
+                discovery_note = "\n（Codex 会话暂时无法同步，以下为上次成功结果。）"
+        sessions = await self.database.list_global_sessions()
+        if not sessions:
+            await self._reply(
+                message,
+                "暂未发现可用的 Codex 会话。" + discovery_note,
+            )
+            return
+        project_count = len({item.project_id for item in sessions if item.project_id})
+        unassigned_count = sum(item.is_unassigned for item in sessions)
+        lines = [
+            f"全部会话（{len(sessions)}） · {project_count} 个项目 · "
+            f"{unassigned_count} 个未归属"
+        ]
+        current_group: str | None = None
+        for index, session in enumerate(sessions, start=1):
+            if session.project_name is None:
+                group = "未归属"
+            elif session.project_enabled:
+                group = session.project_name
+            else:
+                group = f"{session.project_name}（项目已停用）"
+            if group != current_group:
+                lines.append(f"\n{group}")
+                current_group = group
+            marker = "●" if session.is_current_conversation else "○"
+            path_note = "" if session.path_available else " · 路径不可用"
+            source_note = f" · {self._conversation_source_label(session.source)}"
+            lines.append(f"{marker} {index}. {session.title}{source_note}{path_note}")
+        lines.append("\n使用 /session <编号> 切换任意会话；项目只是会话的可选归属。")
+        if unassigned_count:
+            lines.append("未归属会话不会自动获得项目权限，可在 Mac 端明确归属。")
+        await self._reply(message, "\n".join(lines) + discovery_note)
 
     @staticmethod
     def _selectable_sessions(sessions: list[Conversation]) -> list[Conversation]:
@@ -628,14 +660,21 @@ class TelegramRouter:
 
     async def _current_model_state(
         self,
-    ) -> tuple[Project, Conversation, CodexModelOption, str] | None:
+    ) -> tuple[Project | None, Conversation, CodexModelOption, str] | None:
         if self.model_catalog is None:
             return None
-        project = await self.database.current_project()
-        if project is None:
-            return None
-        conversation = await self.database.get_or_create_active_conversation(
-            project.id, title=project.name
+        conversation = await self.database.current_global_conversation()
+        if conversation is None:
+            project = await self.database.current_project()
+            if project is None:
+                return None
+            conversation = await self.database.get_or_create_active_conversation(
+                project.id, title=project.name
+            )
+        project = (
+            await self.database.get_project(conversation.project_id)
+            if conversation.project_id is not None
+            else None
         )
         option, effort = self.model_catalog.effective(
             conversation.model, conversation.reasoning_effort
@@ -658,9 +697,28 @@ class TelegramRouter:
         )
 
     async def _handle_security_command(self, message: IncomingMessage) -> None:
-        project = await self.database.current_project()
+        conversation = await self.database.current_global_conversation()
+        if conversation is None:
+            fallback_project = await self.database.current_project()
+            if fallback_project is None:
+                await self._reply(message, "当前没有选中的会话。请先发送 /sessions。")
+                return
+            conversation = await self.database.get_or_create_active_conversation(
+                fallback_project.id, title=fallback_project.name
+            )
+        project = (
+            await self.database.get_project(conversation.project_id)
+            if conversation.project_id is not None
+            else None
+        )
         if project is None:
-            await self._reply(message, "当前没有可用项目。请先在 Mac 端添加项目。")
+            await self._reply(
+                message,
+                f"当前会话：{conversation.title}\n"
+                "安全模式：受控模式（无项目会话）\n\n"
+                "普通工作可以直接执行；涉及工作目录外文件、网络、提权或敏感数据时，"
+                "会通过 Telegram 单独请求审批。无项目会话不支持“项目内自动允许”。",
+            )
             return
         mode = await self.database.project_approval_mode(
             project.id,

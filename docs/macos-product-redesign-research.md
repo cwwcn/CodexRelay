@@ -56,19 +56,19 @@
 - Apple 公证：https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution
 - Apple Developer ID：https://developer.apple.com/support/developer-id/
 
-## 2. 对当前实现的审计结果
+## 2. 当前实现审计（2026-09-04）
 
-当前实现已经具备菜单栏图标、设置窗口和后台 Runtime，但还不是完整的 macOS 菜单栏产品形态：
+此前的基线问题已完成一轮整改；以下记录当前仍然存在的边界，避免研究文档与实际行为不一致：
 
-1. 普通点击菜单栏图标会直接打开 920×640 的设置窗口，没有轻量概览弹层。
-2. 设置窗口的关闭事件只执行隐藏，但没有标准 App 菜单、`Command-W`、`Command-,` 和可控的 `Command-Q` 生命周期。
-3. 退出时在 UI 线程同步等待 Runtime 最多 35 秒，存在界面冻结风险。
-4. Runtime 仅向 UI 报告连接成功或失败，缺少统一的运行状态快照，无法稳定驱动弹层中的当前项目、任务和审批状态。
-5. `src/codexrelay/ui/app.py` 已超过 1100 行，生命周期、托盘、设置页面和样式耦合在同一文件中。
-6. 版本号同时写在 `pyproject.toml`、`src/codexrelay/__init__.py` 和 PyInstaller spec 中，容易在发布时不一致。
-7. 登录启动通过手写 LaunchAgent 实现，后续应迁移到 `SMAppService`。
-8. 颜色主要为固定浅色值，尚未形成系统深色模式、高对比度、VoiceOver 和键盘遍历规范。
-9. 当前 app 只有 arm64、ad-hoc 签名，没有正式发行所需的 Developer ID、公证、更新签名和发布流水线。
+1. 菜单栏点击显示轻量概览面板，复杂配置在独立设置窗口中完成。
+2. 设置窗口已接入原生 App 菜单、`Command-W`、`Command-,` 和 `Command-Q` 退出确认。
+3. 退出时先隐藏菜单栏图标，再由后台 Runtime 完成有序停止；超时会恢复运行状态并提示用户。
+4. Runtime、菜单栏概览和设置窗口共享不可变状态快照；会话是主对象，项目只是可选归属。
+5. `src/codexrelay/ui/app.py` 仍包含较多 UI 与生命周期代码，后续可以按模块边界渐进拆分，但不影响当前功能。
+6. 版本号已经由 `src/codexrelay/version.py` 作为构建来源，PyInstaller 只读取该来源并写入 `Info.plist`。
+7. 当前登录启动仍由独立 `StartupService` 封装的用户级 LaunchAgent 提供，后续可迁移到 `SMAppService`。
+8. 当前主题以 macOS 浅色界面为主，深色模式和完整辅助功能覆盖仍需在后续 UI 专项中继续增强。
+9. 当前发布包为 arm64 / Intel 架构的 ad-hoc 签名包；Developer ID、公证和正式更新签名仍属于发行增强项。
 
 ## 3. 建议的正式产品形态
 
@@ -87,9 +87,9 @@
 
 - Telegram；
 - Codex 会话设置；
-- 项目；
-- 通用设置；
-- 诊断与关于。
+- 全局会话视图；
+- 系统运行策略与项目归属；
+- 关于与更新。
 
 当前大窗口中的“概览”和左侧 Signal Path 应迁入菜单栏弹层，设置窗口不再承担仪表盘职责。
 
@@ -122,7 +122,7 @@ codexrelay/
 │   ├── application.py       # 应用生命周期、原生菜单、退出协调
 │   ├── status_popover.py    # 菜单栏概览弹层
 │   ├── settings_window.py   # 设置窗口壳
-│   ├── pages/               # Telegram / Codex / Projects / General / Diagnostics
+│   ├── pages/               # Telegram / Codex / Sessions / System / About
 │   ├── state.py             # AppStatusSnapshot
 │   └── commands.py          # 共享 QAction 与快捷键
 ├── platform/
@@ -166,20 +166,10 @@ CodexRelay 后续界面统一遵循 macOS 简洁、克制、清晰的产品语�
 - 颜色仅用于状态和操作重点，默认界面保持安静，避免过量强调色。
 - 优先减少内容和控件数量；只有用户确实需要选择时才增加选项。
 
-## 7. 推荐实施顺序
+## 7. 后续演进顺序
 
-1. 先拆分 UI 与生命周期代码，引入状态快照和命令层。
-2. 实现原生菜单、`Command-W`、`Command-,`、`Command-Q` 与异步退出确认。
-3. 实现菜单栏概览弹层，并把大窗口概览迁出。
-4. 重构设置窗口、深色模式、键盘和辅助功能。
-5. 迁移登录启动到 `SMAppService`，保留旧 LaunchAgent 的一次性兼容清理方案。
-6. 集中版本元数据，加入更新服务空接口和发布配置。
-7. 完成回归、真机交互和故障恢复测试后，再替换当前 `.app`。
-
-## 7. 需要产品确认的决策
-
-1. 退出保护采用“明确确认对话框”还是“长按 Command-Q”；推荐确认对话框。
-2. 菜单栏弹层中的停止任务按钮是否直接执行；推荐再次确认，避免误触中断。
-3. 设置窗口采用顶部工具栏 pane 还是紧凑侧栏；五个分类时推荐顶部工具栏。
-4. 首次启动是否提供三步引导；推荐提供 Telegram Token、配对、项目选择三步引导。
-5. GitHub 开源许可证、公开 bundle identifier、最低 macOS 版本和是否长期只支持 Apple Silicon，需要在首次公开发布前确定。
+1. 继续按模块边界拆分 UI 与生命周期代码，同时保持状态快照和命令注册表的单一来源。
+2. 增强深色模式、键盘焦点、VoiceOver 和动态字体支持。
+3. 迁移登录启动到 `SMAppService`，保留旧 LaunchAgent 的一次性兼容清理方案。
+4. 完成 Developer ID 签名、公证和正式更新签名后，再评估 Sparkle 原地更新。
+5. 在不改变会话优先模型的前提下，评估更多连接器和更细粒度的审批权限。

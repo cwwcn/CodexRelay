@@ -36,8 +36,10 @@ from PySide6.QtGui import (
     QPainter,
     QPainterPath,
     QPaintEvent,
+    QPalette,
     QPen,
     QPixmap,
+    QResizeEvent,
 )
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -47,18 +49,21 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
-    QListWidgetItem,
     QMainWindow,
     QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QStackedWidget,
     QSystemTrayIcon,
     QTextBrowser,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
     QWidgetAction,
@@ -72,7 +77,7 @@ from codexrelay.codex.model_catalog import (
 from codexrelay.connectors.telegram.api import TelegramClient
 from codexrelay.database import Database
 from codexrelay.logging_setup import configure_logging
-from codexrelay.models import Conversation, JobStatus, Project
+from codexrelay.models import Conversation, GlobalSession, JobStatus, Project
 from codexrelay.pairing import PairingService
 from codexrelay.paths import AppPaths
 from codexrelay.projects import ProjectService
@@ -214,6 +219,7 @@ class RuntimeThread(QThread):
     connected = Signal(str, object)
     failed = Signal(str)
     stopped = Signal()
+    sessionSyncFinished = Signal()
 
     def __init__(self, paths: AppPaths) -> None:
         super().__init__()
@@ -254,6 +260,27 @@ class RuntimeThread(QThread):
             self.runtime.relay.interrupt_active(), self._loop
         )
         future.add_done_callback(self._log_interrupt_result)
+
+    def sync_sessions(self) -> None:
+        if self._loop is None or self.runtime is None:
+            self.sessionSyncFinished.emit()
+            return
+        database = self.runtime.database
+        backend = self.runtime.backend
+        if database is None or backend is None:
+            self.sessionSyncFinished.emit()
+            return
+        future = asyncio.run_coroutine_threadsafe(
+            CodexRelayRuntime._sync_registered_projects(database, backend), self._loop
+        )
+        future.add_done_callback(self._emit_session_sync_finished)
+
+    def _emit_session_sync_finished(self, future: Any) -> None:
+        try:
+            future.result()
+        except Exception as error:
+            LOGGER.warning("on-demand session sync failed: %s: %s", type(error).__name__, error)
+        self.sessionSyncFinished.emit()
 
     @staticmethod
     def _log_interrupt_result(future: Any) -> None:
@@ -463,6 +490,118 @@ class TaskStatusDot(QWidget):
         painter.drawEllipse(self.rect().adjusted(1, 1, -1, -1))
 
 
+class MarqueeLabel(QLabel):
+    """Show long single-line values without silently clipping their content."""
+
+    _TICK_MS = 55
+    _INITIAL_PAUSE_TICKS = 24
+    _END_PAUSE_TICKS = 24
+
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("marqueeLabel")
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setMinimumWidth(0)
+        self.setWordWrap(False)
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self._marquee_text = ""
+        self._offset = 0
+        self._pause_ticks = self._INITIAL_PAUSE_TICKS
+        self._pause_at_end = False
+        self._timer = QTimer(self)
+        self._timer.setInterval(self._TICK_MS)
+        self._timer.timeout.connect(self._advance)
+        self.setText(text)
+
+    def setText(self, text: str) -> None:
+        value = str(text)
+        changed = value != self._marquee_text
+        self._marquee_text = value
+        super().setText(value)
+        self.setToolTip(value)
+        self.setAccessibleDescription(value)
+        if changed:
+            self._offset = 0
+            self._pause_ticks = self._INITIAL_PAUSE_TICKS
+            self._pause_at_end = False
+        self._sync_timer()
+        self.update()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        if not self._is_overflowing():
+            self._offset = 0
+        self._sync_timer()
+
+    def showEvent(self, event: Any) -> None:
+        super().showEvent(event)
+        self._sync_timer()
+
+    def hideEvent(self, event: Any) -> None:
+        self._timer.stop()
+        super().hideEvent(event)
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        painter.setClipRect(self.contentsRect())
+        painter.setFont(self.font())
+        painter.setPen(self.palette().color(QPalette.ColorRole.WindowText))
+        text_width = self._text_width()
+        available_width = self.contentsRect().width()
+        baseline = (self.height() - self.fontMetrics().height()) // 2
+        baseline += self.fontMetrics().ascent()
+        if text_width <= available_width:
+            painter.drawText(self.contentsRect().left(), baseline, self._marquee_text)
+            return
+        offset = self._offset
+        start_x = self.contentsRect().left() - offset
+        painter.drawText(start_x, baseline, self._marquee_text)
+
+    def _text_width(self) -> int:
+        return self.fontMetrics().horizontalAdvance(self._marquee_text)
+
+    def _is_overflowing(self) -> bool:
+        return bool(self._marquee_text) and self._text_width() > self.contentsRect().width()
+
+    def _sync_timer(self) -> None:
+        if self.isVisible() and self._is_overflowing():
+            if not self._timer.isActive():
+                self._timer.start()
+        else:
+            self._timer.stop()
+
+    def _advance(self) -> None:
+        if not self._is_overflowing():
+            self._offset = 0
+            self._pause_at_end = False
+            self._sync_timer()
+            self.update()
+            return
+        if self._pause_ticks:
+            self._pause_ticks -= 1
+            if self._pause_at_end and self._pause_ticks == 0:
+                self._offset = 0
+                self._pause_at_end = False
+                self._pause_ticks = self._INITIAL_PAUSE_TICKS
+                self.update()
+            return
+        if self._pause_at_end:
+            self._offset = 0
+            self._pause_at_end = False
+            self._pause_ticks = self._INITIAL_PAUSE_TICKS
+            self.update()
+            return
+        self._offset += 1
+        max_offset = max(0, self._text_width() - self.contentsRect().width())
+        if self._offset >= max_offset:
+            self._offset = max_offset
+            self._pause_ticks = self._END_PAUSE_TICKS
+            self._pause_at_end = True
+        self.update()
+
+
 class AboutMark(QWidget):
     """Scalable brand mark shared by the About and confirmation surfaces."""
 
@@ -668,7 +807,7 @@ class MenuOverview(QWidget):
         context_layout.setSpacing(6)
         context_header = QHBoxLayout()
         context_header.setSpacing(8)
-        project_caption = QLabel("工作区")
+        project_caption = QLabel("会话归属")
         project_caption.setObjectName("menuSectionLabel")
         self.project = QLabel("尚未选择")
         self.project.setObjectName("menuProjectValue")
@@ -687,7 +826,7 @@ class MenuOverview(QWidget):
         session_caption = QLabel("会话")
         session_caption.setObjectName("menuCaption")
         session_caption.setFixedWidth(28)
-        self.session_value = QLabel("未选择会话")
+        self.session_value = MarqueeLabel("未选择会话")
         self.session_value.setObjectName("menuSessionValue")
         config_row.addWidget(session_caption)
         config_row.addWidget(self.session_value, 1)
@@ -783,7 +922,7 @@ class MenuOverview(QWidget):
         self.task.setText(snapshot.task_title)
         if snapshot.active_job_count:
             self.task_detail.setText(
-                f"项目：{snapshot.active_project or snapshot.current_project or '当前项目'}"
+                f"会话：{snapshot.conversation_title or snapshot.active_project or '当前会话'}"
             )
         else:
             self.task_detail.setText("没有运行中的任务")
@@ -804,6 +943,7 @@ class SettingsWindow(QMainWindow):
     settings_closed = Signal()
     update_available = Signal(str)
     update_state_changed = Signal(object)
+    global_session_sync_requested = Signal()
 
     def __init__(self, paths: AppPaths, pool: QThreadPool) -> None:
         super().__init__()
@@ -816,7 +956,9 @@ class SettingsWindow(QMainWindow):
         self.secret_store = SecretStore(paths.telegram_tokens)
         self.startup_service = StartupService()
         self.model_catalog: CodexModelCatalog | None = None
-        self.model_project_id: str | None = None
+        self.model_conversation_id: str | None = None
+        self._global_sessions: list[GlobalSession] = []
+        self._global_session_action_running = False
         self._updating_model_controls = False
         self._workers: set[AsyncWorker] = set()
         self.update_provider: UpdateProvider | None = None
@@ -832,6 +974,7 @@ class SettingsWindow(QMainWindow):
         self._load_codex_status()
         self._load_projects()
         self._load_token_status()
+        self._load_global_sessions()
 
     def install_application_menu(
         self,
@@ -866,7 +1009,7 @@ class SettingsWindow(QMainWindow):
         eyebrow.setObjectName("eyebrow")
         title = QLabel("CodexRelay")
         title.setObjectName("windowTitle")
-        subtitle = QLabel("设置连接、项目与安全边界")
+        subtitle = QLabel("设置连接、会话与运行策略")
         subtitle.setObjectName("subtitle")
         heading = QHBoxLayout()
         heading.setSpacing(14)
@@ -878,7 +1021,7 @@ class SettingsWindow(QMainWindow):
 
         self.telegram_status = StatusNode("Telegram", "检查中")
         self.codex_status = StatusNode("Codex", "本机运行时")
-        self.project_status = StatusNode("当前项目", "尚未选择")
+        self.project_status = StatusNode("会话归属", "尚未选择")
 
         status_strip = QFrame()
         status_strip.setObjectName("statusStrip")
@@ -899,14 +1042,14 @@ class SettingsWindow(QMainWindow):
         self.navigation.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.navigation.setSpacing(4)
         self.navigation.setFixedHeight(38)
-        self.navigation.addItems(["Telegram", "Codex", "项目", "系统", "关于"])
+        self.navigation.addItems(["Telegram", "Codex", "会话", "系统", "关于"])
         self.navigation.setCurrentRow(0)
         outer.addWidget(self.navigation)
 
         self.pages = QStackedWidget()
         self.pages.addWidget(self._telegram_page())
         self.pages.addWidget(self._codex_page())
-        self.pages.addWidget(self._projects_page())
+        self.pages.addWidget(self._sessions_page())
         self.pages.addWidget(self._system_page())
         self.pages.addWidget(self._about_page())
         self.navigation.currentRowChanged.connect(self._navigation_changed)
@@ -922,6 +1065,8 @@ class SettingsWindow(QMainWindow):
         if index == 1:
             self._load_model_configuration()
         elif index == 2:
+            self._request_global_session_sync()
+        elif index == 3:
             self._load_projects()
 
     def set_update_provider(self, provider: UpdateProvider) -> None:
@@ -946,8 +1091,8 @@ class SettingsWindow(QMainWindow):
         layout.addWidget(self.overview_message)
 
         explanation = QLabel(
-            "消息只会从已配对的Telegram私聊进入。每个任务都绑定到当前授权项目，"
-            "运行期间Mac保持唤醒，完成后恢复正常睡眠策略。"
+            "消息只会从已配对的Telegram私聊进入。每个任务都绑定到当前会话；"
+            "项目仅作为可选归属与授权边界。运行期间Mac保持唤醒，完成后恢复正常睡眠策略。"
         )
         explanation.setObjectName("bodyText")
         explanation.setWordWrap(True)
@@ -991,29 +1136,96 @@ class SettingsWindow(QMainWindow):
         layout.addStretch(1)
         return page
 
-    def _projects_page(self) -> QWidget:
-        page, layout = self._page("项目", "Telegram只能查看和切换这里授权的目录")
-        self.project_list = QListWidget()
-        self.project_list.setObjectName("projectList")
-        layout.addWidget(self.project_list, 1)
-        buttons = QHBoxLayout()
-        add_button = QPushButton("添加项目…")
-        add_button.clicked.connect(self._add_project)
-        scan_button = QPushButton("扫描项目")
-        scan_button.clicked.connect(self._scan_projects)
-        current_button = QPushButton("设为当前项目")
-        current_button.setObjectName("primaryButton")
-        current_button.clicked.connect(self._switch_project)
-        buttons.addWidget(add_button)
-        buttons.addWidget(scan_button)
-        buttons.addStretch(1)
-        buttons.addWidget(current_button)
-        layout.addLayout(buttons)
+    def _sessions_page(self) -> QWidget:
+        page = QFrame()
+        page.setObjectName("page")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(24, 18, 24, 20)
+        layout.setSpacing(10)
+
+        header = QHBoxLayout()
+        header.setSpacing(14)
+        title = QLabel("会话")
+        title.setObjectName("pageTitle")
+        subtitle = QLabel("查看本机 Codex 的全部会话；项目仅显示为可选归属")
+        subtitle.setObjectName("pageSubtitle")
+        header.addWidget(title)
+        header.addWidget(subtitle)
+        header.addStretch(1)
+        layout.addLayout(header)
+
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(10)
+        filter_label = QLabel("显示")
+        filter_label.setObjectName("sessionFilterLabel")
+        self.global_session_filter = ChoiceButton()
+        self.global_session_filter.setFixedWidth(156)
+        self.global_session_filter.addItem("全部会话", "all")
+        self.global_session_filter.addItem("有项目", "assigned")
+        self.global_session_filter.addItem("未归属", "unassigned")
+        self.global_session_filter.currentIndexChanged.connect(
+            lambda _index: self._render_global_sessions()
+        )
+        filter_row.addWidget(filter_label)
+        filter_row.addWidget(self.global_session_filter)
+        filter_row.addStretch(1)
+        self.global_sessions_summary = QLabel("正在读取全局会话…")
+        self.global_sessions_summary.setObjectName("sessionSummary")
+        self.global_sessions_summary.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        filter_row.addWidget(self.global_sessions_summary)
+        layout.addLayout(filter_row)
+
+        self.global_session_list = QTreeWidget()
+        self.global_session_list.setObjectName("globalSessionList")
+        self.global_session_list.setHeaderHidden(True)
+        self.global_session_list.setRootIsDecorated(False)
+        # Keep the hierarchy visually, but remove Qt's native branch gutter.
+        # The gutter is painted as a second selection column and creates an
+        # unexpected blue strip beside selected sessions on macOS.
+        self.global_session_list.setIndentation(0)
+        self.global_session_list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.global_session_list.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        self.global_session_list.itemSelectionChanged.connect(
+            self._global_session_selected
+        )
+        layout.addWidget(self.global_session_list, 1)
+
+        action_bar = QFrame()
+        action_bar.setObjectName("sessionActionBar")
+        actions = QHBoxLayout(action_bar)
+        actions.setContentsMargins(8, 6, 8, 6)
+        actions.setSpacing(8)
+        self.global_refresh_button = QPushButton("刷新列表")
+        self.global_refresh_button.setProperty("sessionAction", True)
+        self.global_refresh_button.clicked.connect(self._request_global_session_sync)
+        self.global_assign_button = QPushButton("归属到项目…")
+        self.global_assign_button.setObjectName("secondaryButton")
+        self.global_assign_button.setProperty("sessionAction", True)
+        self.global_assign_button.setEnabled(False)
+        self.global_assign_button.clicked.connect(self._assign_global_session)
+        self.global_session_feedback = QLabel("请选择一个会话")
+        self.global_session_feedback.setObjectName("sessionActionStatus")
+        self.global_session_feedback.setAccessibleName("会话操作状态")
+        self.global_session_feedback.setProperty("state", "neutral")
+        self.global_activate_button = QPushButton("切换到会话")
+        self.global_activate_button.setObjectName("primaryButton")
+        self.global_activate_button.setProperty("sessionAction", True)
+        self.global_activate_button.setEnabled(False)
+        self.global_activate_button.clicked.connect(self._activate_global_session)
+        actions.addWidget(self.global_refresh_button)
+        actions.addWidget(self.global_assign_button)
+        actions.addWidget(self.global_session_feedback, 1)
+        actions.addWidget(self.global_activate_button)
+        layout.addWidget(action_bar)
         return page
 
     def _codex_page(self) -> QWidget:
-        page, layout = self._page("Codex", "为当前项目的当前会话选择执行模型")
-        self.model_scope = QLabel("正在读取当前项目…")
+        page, layout = self._page("Codex", "为当前会话选择执行模型与推理强度")
+        self.model_scope = QLabel("正在读取当前会话…")
         self.model_scope.setObjectName("scopeStatus")
         self.model_scope.setMaximumWidth(520)
         layout.addWidget(self.model_scope)
@@ -1075,46 +1287,127 @@ class SettingsWindow(QMainWindow):
         return page
 
     def _system_page(self) -> QWidget:
-        page, layout = self._page("系统", "本机运行策略")
+        page = QFrame()
+        page.setObjectName("page")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(24, 18, 24, 20)
+        layout.setSpacing(14)
+
+        page_title = QLabel("系统")
+        page_title.setObjectName("pageTitle")
+        page_subtitle = QLabel("本机运行策略")
+        page_subtitle.setObjectName("pageSubtitle")
+        layout.addWidget(page_title)
+        layout.addWidget(page_subtitle)
+        layout.addSpacing(2)
+
+        project_group = QFrame()
+        project_group.setObjectName("systemGroup")
+        project_layout = QVBoxLayout(project_group)
+        project_layout.setContentsMargins(0, 0, 0, 12)
+        project_layout.setSpacing(8)
+        project_heading = QLabel("项目")
+        project_heading.setObjectName("sectionTitle")
+        project_hint = QLabel("项目提供授权目录与项目级安全策略；会话也可以不归属任何项目。")
+        project_hint.setObjectName("sectionHint")
+        project_layout.addWidget(project_heading)
+        project_layout.addWidget(project_hint)
+        project_buttons = QHBoxLayout()
+        project_buttons.setSpacing(8)
+        self.project_selector = ChoiceButton()
+        self.project_selector.setFixedWidth(250)
+        self.project_selector.setMinimumHeight(34)
+        self.project_selector.setMaximumHeight(34)
+        self.project_selector.setAccessibleName("选择授权项目")
+        add_button = QPushButton("添加项目…")
+        add_button.setFixedHeight(32)
+        add_button.clicked.connect(self._add_project)
+        scan_button = QPushButton("扫描")
+        scan_button.setFixedHeight(32)
+        scan_button.clicked.connect(self._scan_projects)
+        current_button = QPushButton("设为当前项目")
+        current_button.setObjectName("primaryButton")
+        current_button.setFixedHeight(32)
+        current_button.clicked.connect(self._switch_project)
+        self.current_project_button = current_button
+        project_buttons.addWidget(self.project_selector)
+        project_buttons.addWidget(add_button)
+        project_buttons.addWidget(scan_button)
+        project_buttons.addWidget(current_button)
+        project_buttons.addStretch(1)
+        project_layout.addLayout(project_buttons)
+        self.project_summary = QLabel("正在读取项目…")
+        self.project_summary.setObjectName("sectionSummary")
+        project_layout.addWidget(self.project_summary)
+        layout.addWidget(project_group)
+        project_divider = QFrame()
+        project_divider.setObjectName("systemDivider")
+        project_divider.setFixedHeight(1)
+        layout.addWidget(project_divider)
+
+        runtime_group = QFrame()
+        runtime_group.setObjectName("systemGroup")
+        runtime_layout = QVBoxLayout(runtime_group)
+        runtime_layout.setContentsMargins(0, 10, 0, 12)
+        runtime_layout.setSpacing(5)
+        settings_heading = QLabel("运行设置")
+        settings_heading.setObjectName("sectionTitle")
+        runtime_layout.addWidget(settings_heading)
         self.auto_connect = QCheckBox("启动后自动连接Telegram")
         self.auto_connect.setChecked(self.settings.app.auto_connect)
+        self.auto_connect.setMinimumHeight(28)
         self.prevent_sleep = QCheckBox("任务运行期间阻止Mac自动睡眠")
         self.prevent_sleep.setChecked(self.settings.app.prevent_sleep_while_running)
+        self.prevent_sleep.setMinimumHeight(28)
         self.launch_at_login = QCheckBox("登录Mac时启动CodexRelay")
         self.launch_at_login.setChecked(self.startup_service.enabled)
         self.launch_at_login.setEnabled(self.startup_service.available)
+        self.launch_at_login.setMinimumHeight(28)
         launch_hint = QLabel(
             "登录启动只在打包后的个人版中开放。"
             if not self.startup_service.available
             else "修改后在下次登录Mac时生效。"
         )
-        launch_hint.setObjectName("hint")
+        launch_hint.setObjectName("sectionHint")
         save_button = QPushButton("保存系统设置")
         save_button.setObjectName("primaryButton")
+        save_button.setFixedHeight(32)
         save_button.clicked.connect(self._save_system_settings)
+        runtime_layout.addWidget(self.auto_connect)
+        runtime_layout.addWidget(self.prevent_sleep)
+        runtime_layout.addWidget(self.launch_at_login)
+        runtime_actions = QHBoxLayout()
+        runtime_actions.setContentsMargins(0, 2, 0, 0)
+        runtime_actions.addWidget(launch_hint, 1)
+        runtime_actions.addWidget(save_button)
+        runtime_layout.addLayout(runtime_actions)
+        layout.addWidget(runtime_group)
+        runtime_divider = QFrame()
+        runtime_divider.setObjectName("systemDivider")
+        runtime_divider.setFixedHeight(1)
+        layout.addWidget(runtime_divider)
+
+        storage_group = QFrame()
+        storage_group.setObjectName("systemGroup")
+        storage_layout = QHBoxLayout(storage_group)
+        storage_layout.setContentsMargins(0, 10, 0, 0)
+        storage_layout.setSpacing(8)
         self.storage_status = QLabel(self._storage_summary())
-        self.storage_status.setObjectName("hint")
+        self.storage_status.setObjectName("sectionSummary")
+        storage_layout.addWidget(self.storage_status, 1)
         data_button = QPushButton("打开数据目录")
+        data_button.setFixedHeight(32)
         data_button.clicked.connect(
             lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.paths.data_dir)))
         )
         log_button = QPushButton("打开日志目录")
+        log_button.setFixedHeight(32)
         log_button.clicked.connect(
             lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.paths.log_dir)))
         )
-        directory_buttons = QHBoxLayout()
-        directory_buttons.addWidget(data_button)
-        directory_buttons.addWidget(log_button)
-        directory_buttons.addStretch(1)
-        layout.addWidget(self.auto_connect)
-        layout.addWidget(self.prevent_sleep)
-        layout.addWidget(self.launch_at_login)
-        layout.addWidget(launch_hint)
-        layout.addSpacing(14)
-        layout.addWidget(save_button, alignment=Qt.AlignmentFlag.AlignLeft)
-        layout.addSpacing(18)
-        layout.addWidget(self.storage_status)
-        layout.addLayout(directory_buttons)
+        storage_layout.addWidget(data_button)
+        storage_layout.addWidget(log_button)
+        layout.addWidget(storage_group)
         layout.addStretch(1)
         return page
 
@@ -1497,22 +1790,29 @@ class SettingsWindow(QMainWindow):
 
         async def load() -> object:
             async with Database(self.paths.database) as database:
-                project = await database.current_project()
-                conversation = (
-                    None
-                    if project is None
-                    else await database.get_or_create_active_conversation(
-                        project.id, title=project.name
+                conversation = await database.current_global_conversation()
+                if conversation is None:
+                    project = await database.current_project()
+                    conversation = (
+                        None
+                        if project is None
+                        else await database.get_or_create_active_conversation(
+                            project.id, title=project.name
+                        )
                     )
+                project = (
+                    None
+                    if conversation is None or conversation.project_id is None
+                    else await database.get_project(conversation.project_id)
                 )
                 return project, conversation
 
         def finished(value: object) -> None:
             project, conversation = cast(tuple[Project | None, Conversation | None], value)
-            if project is None or conversation is None or self.model_catalog is None:
-                self.model_project_id = None
-                self.model_scope.setText("尚未选择项目")
-                self.model_description.setText("请先在“项目”页面添加并选择一个项目。")
+            if conversation is None or self.model_catalog is None:
+                self.model_conversation_id = None
+                self.model_scope.setText("尚未选择会话")
+                self.model_description.setText("请先在“会话”页面选择一个会话。")
                 self.model_combo.setEnabled(False)
                 self.reasoning_combo.setEnabled(False)
                 self.save_model_button.setEnabled(False)
@@ -1520,7 +1820,7 @@ class SettingsWindow(QMainWindow):
             option, effort = self.model_catalog.effective(
                 conversation.model, conversation.reasoning_effort
             )
-            self.model_project_id = project.id
+            self.model_conversation_id = conversation.id
             self._updating_model_controls = True
             model_index = self.model_combo.findData(option.model)
             self.model_combo.setCurrentIndex(max(model_index, 0))
@@ -1530,7 +1830,8 @@ class SettingsWindow(QMainWindow):
             self.reasoning_combo.setEnabled(True)
             self.save_model_button.setEnabled(True)
             self.model_scope.setText(
-                f"当前会话  ·  {project.name}  ·  设置随项目保留"
+                f"当前会话  ·  {conversation.title}"
+                + (f"  ·  {project.name}" if project is not None else "  ·  无项目")
             )
             inherited = conversation.model is None or conversation.reasoning_effort is None
             self.model_save_status.setText("当前沿用本机默认值" if inherited else "已保存")
@@ -1582,10 +1883,10 @@ class SettingsWindow(QMainWindow):
             self.model_description.setText(f"{option.description}\n标识：{option.model}")
 
     def _save_model_configuration(self) -> None:
-        project_id = self.model_project_id
+        conversation_id = self.model_conversation_id
         model = self.model_combo.currentData()
         effort = self.reasoning_combo.currentData()
-        if project_id is None or model is None or effort is None or self.model_catalog is None:
+        if conversation_id is None or model is None or effort is None or self.model_catalog is None:
             self._show_error("当前没有可保存的模型设置")
             return
         option = self.model_catalog.get(str(model))
@@ -1597,14 +1898,10 @@ class SettingsWindow(QMainWindow):
 
         async def save() -> object:
             async with Database(self.paths.database) as database:
-                project = await database.get_project(project_id)
-                if project is None:
-                    raise RuntimeError("当前项目已不存在")
-                return await database.set_active_conversation_model(
-                    project.id,
+                return await database.set_conversation_model(
+                    conversation_id,
                     model=option.model,
                     reasoning_effort=str(effort),
-                    title=project.name,
                 )
 
         def finished(_value: object) -> None:
@@ -1678,30 +1975,311 @@ class SettingsWindow(QMainWindow):
     def _load_projects(self) -> None:
         async def load() -> object:
             async with Database(self.paths.database) as database:
-                return await ProjectService(database).list_projects()
+                return (
+                    await ProjectService(database).list_projects(),
+                    await database.current_global_conversation(),
+                )
 
         def finished(value: object) -> None:
-            projects = value if isinstance(value, list) else []
-            self.project_list.clear()
+            if isinstance(value, tuple) and len(value) == 2:
+                raw_projects, conversation = value
+                projects = raw_projects if isinstance(raw_projects, list) else []
+            else:
+                projects = []
+                conversation = None
+            self.project_selector.clear()
             current_name = "尚未选择"
+            if isinstance(conversation, Conversation):
+                current_name = "无项目" if conversation.project_id is None else "已归属项目"
             for project in projects:
-                prefix = "✓ 当前" if project.is_current else "○"
-                item = QListWidgetItem(f"{prefix}  {project.name}\n    {project.path}")
-                item.setData(Qt.ItemDataRole.UserRole, project.id)
-                item.setToolTip(str(project.path))
-                self.project_list.addItem(item)
+                self.project_selector.addItem(project.name, project.id)
                 if project.is_current:
-                    current_name = project.name
-                    font = item.font()
-                    font.setBold(True)
-                    item.setFont(font)
-                    self.project_list.setCurrentItem(item)
+                    if (
+                        isinstance(conversation, Conversation)
+                        and conversation.project_id == project.id
+                    ):
+                        current_name = project.name
+                    self.project_selector.setCurrentIndex(
+                        self.project_selector.findData(project.id)
+                    )
+            has_projects = bool(projects)
+            self.project_selector.setEnabled(has_projects)
+            self.current_project_button.setEnabled(has_projects)
+            if has_projects:
+                self.project_selector.setToolTip(
+                    "选择一个已授权项目，然后设为当前项目"
+                )
+                self.project_summary.setText(
+                    f"已授权 {len(projects)} 个项目 · 当前：{current_name}"
+                )
+            else:
+                self.project_selector.setText("暂无已授权项目")
+                self.project_selector.setToolTip("添加项目后可在这里切换")
+                self.project_summary.setText("暂无已授权项目 · 无项目会话仍可直接使用")
             state = "ready" if projects else "warning"
             self.project_status.set_state(state, current_name)
             self._refresh_overview()
             self._load_model_configuration()
 
         self._run(load, finished=finished)
+
+    def _load_global_sessions(
+        self,
+        *,
+        feedback_message: str | None = None,
+        feedback_state: str = "success",
+    ) -> None:
+        if not hasattr(self, "global_session_list"):
+            return
+
+        def finished(value: object) -> None:
+            sessions = value if isinstance(value, list) else []
+            self._global_sessions = [item for item in sessions if isinstance(item, GlobalSession)]
+            unassigned = sum(item.is_unassigned for item in self._global_sessions)
+            projects = len({item.project_id for item in self._global_sessions if item.project_id})
+            if self._global_sessions:
+                self.global_sessions_summary.setText(
+                    f"{len(self._global_sessions)} 个会话 · {projects} 个项目 · "
+                    f"{unassigned} 个未归属"
+                )
+            else:
+                self.global_sessions_summary.setText("暂未发现 Codex 会话")
+            self._render_global_sessions()
+            if feedback_message is not None:
+                self._set_global_session_feedback(feedback_message, feedback_state)
+
+        async def load() -> object:
+            async with Database(self.paths.database) as database:
+                return await database.list_global_sessions()
+
+        self._run(load, finished=finished)
+
+    def _render_global_sessions(self) -> None:
+        if not hasattr(self, "global_session_list"):
+            return
+        selected = self._selected_global_session()
+        selected_thread = None if selected is None else selected.thread_id
+        mode = str(self.global_session_filter.currentData() or "all")
+        visible = [
+            session
+            for session in self._global_sessions
+            if mode == "all"
+            or (mode == "assigned" and session.project_id is not None)
+            or (mode == "unassigned" and session.is_unassigned)
+        ]
+        grouped: dict[str, list[GlobalSession]] = {}
+        for session in visible:
+            if session.project_name is None:
+                scope = "未归属"
+            elif session.project_enabled:
+                scope = session.project_name
+            else:
+                scope = f"{session.project_name}（已停用）"
+            grouped.setdefault(scope, []).append(session)
+
+        self.global_session_list.blockSignals(True)
+        self.global_session_list.clear()
+        selected_item: QTreeWidgetItem | None = None
+        for scope, sessions in grouped.items():
+            group = QTreeWidgetItem([f"{scope}  ·  {len(sessions)}"])
+            group.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            group.setData(0, Qt.ItemDataRole.UserRole, None)
+            group.setSizeHint(0, QSize(0, 34))
+            self.global_session_list.addTopLevelItem(group)
+            for session in sessions:
+                state = "  ·  当前会话" if session.is_current_conversation else ""
+                path = str(session.cwd)
+                if not session.path_available:
+                    path = f"路径不可用  ·  {path}"
+                item = QTreeWidgetItem([f"   {session.title}{state}\n   {path}"])
+                item.setData(0, Qt.ItemDataRole.UserRole, session.thread_id)
+                item.setToolTip(0, f"{session.title}\n{session.cwd}\n{session.thread_id}")
+                item.setSizeHint(0, QSize(0, 48))
+                group.addChild(item)
+                if session.thread_id == selected_thread or (
+                    selected_thread is None and session.is_current_conversation
+                ):
+                    selected_item = item
+            group.setExpanded(True)
+        self.global_session_list.blockSignals(False)
+        if selected_item is not None:
+            self.global_session_list.setCurrentItem(selected_item)
+        self._global_session_selected()
+
+    def _request_global_session_sync(self) -> None:
+        self.global_refresh_button.setEnabled(False)
+        self.global_sessions_summary.setText("正在同步 Codex 会话…")
+        self._set_global_session_feedback("正在刷新会话列表…", "loading")
+        self.global_session_sync_requested.emit()
+
+    def _finish_global_session_refresh(self) -> None:
+        self.global_refresh_button.setEnabled(True)
+        self._load_global_sessions(feedback_message="会话列表已刷新")
+
+    def _selected_global_session(self) -> GlobalSession | None:
+        item = self.global_session_list.currentItem()
+        if item is None:
+            return None
+        thread_id = item.data(0, Qt.ItemDataRole.UserRole)
+        return next(
+            (session for session in self._global_sessions if session.thread_id == thread_id),
+            None,
+        )
+
+    def _global_session_selected(self) -> None:
+        session = self._selected_global_session()
+        self.global_assign_button.setText("归属到项目…")
+        self.global_activate_button.setText("切换到会话")
+        if self._global_session_action_running:
+            self.global_assign_button.setEnabled(False)
+            self.global_activate_button.setEnabled(False)
+            return
+        self.global_assign_button.setEnabled(session is not None and session.is_unassigned)
+        if session is None:
+            self.global_activate_button.setEnabled(False)
+            self._set_global_session_feedback("请选择一个会话", "neutral")
+            return
+        if session.is_current_conversation:
+            self.global_activate_button.setEnabled(False)
+            self.global_activate_button.setText("当前会话")
+            self._set_global_session_feedback("当前正在使用这个会话", "success")
+            return
+        if session.is_unassigned:
+            if not session.path_available:
+                self.global_activate_button.setEnabled(False)
+                self._set_global_session_feedback("无项目 · 工作目录不可用", "attention")
+                return
+            self.global_activate_button.setEnabled(True)
+            self._set_global_session_feedback("无项目会话 · 已选择，可直接切换", "neutral")
+            return
+        if not session.project_enabled:
+            self.global_activate_button.setEnabled(False)
+            self._set_global_session_feedback("所属项目已停用，暂时无法切换", "attention")
+            return
+        if session.conversation_id is None:
+            self.global_activate_button.setEnabled(False)
+            self._set_global_session_feedback("会话尚未完成同步，请刷新列表", "attention")
+            return
+        self.global_activate_button.setEnabled(True)
+        self._set_global_session_feedback("已选择 · 点击右侧切换", "neutral")
+
+    def _set_global_session_feedback(self, text: str, state: str) -> None:
+        self.global_session_feedback.setText(text)
+        self.global_session_feedback.setProperty("state", state)
+        style = self.global_session_feedback.style()
+        style.unpolish(self.global_session_feedback)
+        style.polish(self.global_session_feedback)
+        self.global_session_feedback.update()
+
+    def _assign_global_session(self) -> None:
+        session = self._selected_global_session()
+        if session is None:
+            return
+
+        async def load_projects() -> object:
+            async with Database(self.paths.database) as database:
+                return await ProjectService(database).list_projects()
+
+        self._global_session_action_running = True
+        self.global_assign_button.setEnabled(False)
+        self.global_assign_button.setText("读取项目…")
+        self.global_activate_button.setEnabled(False)
+        self._set_global_session_feedback("正在读取可用项目…", "loading")
+
+        def choose_project(value: object) -> None:
+            projects = value if isinstance(value, list) else []
+            if not projects:
+                self._global_session_action_running = False
+                self._global_session_selected()
+                self._set_global_session_feedback(
+                    "暂无已授权项目，请先到‘系统’页添加项目", "attention"
+                )
+                return
+            choices = [f"{project.name}  ·  {project.path}" for project in projects]
+            choice, accepted = QInputDialog.getItem(
+                self,
+                "选择项目归属",
+                f"将“{session.title}”归属到哪个项目？",
+                choices,
+                0,
+                False,
+            )
+            if not accepted:
+                self._global_session_action_running = False
+                self._global_session_selected()
+                return
+            selected_index = choices.index(choice)
+            project = projects[selected_index]
+            box = QMessageBox(self)
+            box.setWindowTitle("确认会话归属")
+            box.setText(f"将“{session.title}”归属到项目“{project.name}”？")
+            box.setInformativeText(
+                f"授权目录：{project.path}\n\n"
+                "会话原始工作路径不会因此获得授权；后续任务将使用该项目的授权边界。"
+            )
+            cancel = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+            assign_button = box.addButton("确认归属", QMessageBox.ButtonRole.AcceptRole)
+            box.setDefaultButton(cancel)
+            box.exec()
+            if box.clickedButton() is not assign_button:
+                self._global_session_action_running = False
+                self._global_session_selected()
+                return
+
+            async def assign() -> object:
+                async with Database(self.paths.database) as database:
+                    return await database.assign_global_session(session.thread_id, project.id)
+
+            self.global_assign_button.setText("正在归属…")
+            self._set_global_session_feedback("正在更新会话归属…", "loading")
+
+            def assigned(_value: object) -> None:
+                self._global_session_action_running = False
+                self._load_global_sessions(
+                    feedback_message=f"已归属到 {project.name} · 现在可以切换到这个会话"
+                )
+
+            def assign_failed(message: str) -> None:
+                self._global_session_action_running = False
+                self._global_session_selected()
+                self._show_error(message)
+
+            self._run(assign, finished=assigned, failed=assign_failed)
+
+        def project_load_failed(message: str) -> None:
+            self._global_session_action_running = False
+            self._global_session_selected()
+            self._show_error(message)
+
+        self._run(load_projects, finished=choose_project, failed=project_load_failed)
+
+    def _activate_global_session(self) -> None:
+        session = self._selected_global_session()
+        if session is None:
+            return
+
+        async def activate() -> object:
+            async with Database(self.paths.database) as database:
+                return await database.activate_global_session(session.thread_id)
+
+        self._global_session_action_running = True
+        self.global_assign_button.setEnabled(False)
+        self.global_activate_button.setEnabled(False)
+        self.global_activate_button.setText("正在切换…")
+        self._set_global_session_feedback("正在切换当前会话…", "loading")
+
+        def finished(_value: object) -> None:
+            self._global_session_action_running = False
+            self._load_projects()
+            self._load_global_sessions(feedback_message="切换完成 · 当前会话已更新")
+            self._load_model_configuration()
+
+        def failed(message: str) -> None:
+            self._global_session_action_running = False
+            self._global_session_selected()
+            self._show_error(message)
+
+        self._run(activate, finished=finished, failed=failed)
 
     def _add_project(self) -> None:
         selected = QFileDialog.getExistingDirectory(self, "选择项目目录")
@@ -1744,11 +2322,10 @@ class SettingsWindow(QMainWindow):
         self._run(scan, finished=finished)
 
     def _switch_project(self) -> None:
-        item = self.project_list.currentItem()
-        if item is None:
+        project_id = self.project_selector.currentData()
+        if project_id is None:
             self._show_error("请先选择一个项目")
             return
-        project_id = item.data(Qt.ItemDataRole.UserRole)
 
         async def switch() -> object:
             async with Database(self.paths.database) as database:
@@ -1803,7 +2380,7 @@ class SettingsWindow(QMainWindow):
 
     def set_runtime_failed(self, message: str) -> None:
         self.model_catalog = None
-        self.model_scope.setText("连接服务失败，暂时无法读取当前项目配置。")
+        self.model_scope.setText("连接服务失败，暂时无法读取当前会话配置。")
         self.model_description.setText("请检查网络或配置后，点击菜单栏中的“重新连接”。")
         self.model_combo.clear()
         self.reasoning_combo.clear()
@@ -1830,14 +2407,14 @@ class SettingsWindow(QMainWindow):
         elif "TelegramTransportError" in message:
             self.overview_message.setText("Telegram 暂时无法连接，请检查网络后点击“重新连接”。")
         elif "FileNotFoundError" in message or "No such file or directory" in message:
-            self.overview_message.setText("当前项目路径不可用，请扫描项目或重新选择项目。")
+            self.overview_message.setText("当前会话工作路径不可用，请在会话列表中选择其他会话。")
         else:
             self.overview_message.setText(message)
 
     def _refresh_overview(self) -> None:
         telegram = self.telegram_status.detail.text()
         project = self.project_status.detail.text()
-        self.overview_message.setText(f"Telegram {telegram} · 当前项目 {project}")
+        self.overview_message.setText(f"Telegram {telegram} · 会话归属 {project}")
 
     def _show_error(self, message: str) -> None:
         self.save_token_button.setEnabled(True)
@@ -1869,6 +2446,7 @@ class TrayApplication(QObject):
         self._workers: set[AsyncWorker] = set()
         self.snapshot = AppStatusSnapshot()
         self.window.set_update_provider(self.update_provider)
+        self.window.global_session_sync_requested.connect(self._sync_global_sessions)
 
         self.tray = QSystemTrayIcon(make_icon(), self)
         self.tray.setToolTip("CodexRelay")
@@ -1947,6 +2525,17 @@ class TrayApplication(QObject):
         self.window.raise_()
         self.window.activateWindow()
 
+    def _sync_global_sessions(self) -> None:
+        thread = self.runtime_thread
+        if thread is None or not thread.isRunning():
+            self.window._finish_global_session_refresh()
+            return
+        thread.sessionSyncFinished.connect(
+            self.window._finish_global_session_refresh,
+            Qt.ConnectionType.SingleShotConnection,
+        )
+        thread.sync_sessions()
+
     def show_about(self) -> None:
         self.show_window()
         if self.window.height() < 760:
@@ -2011,11 +2600,7 @@ class TrayApplication(QObject):
                 telegram_paired = await database.has_enabled_identity(
                     connector_type="telegram", account_id="main-bot"
                 )
-                conversation = (
-                    None
-                    if current is None
-                    else await database.current_conversation(current.id)
-                )
+                conversation = await database.current_global_conversation()
                 return (
                     current,
                     active_project,
@@ -2047,7 +2632,17 @@ class TrayApplication(QObject):
             )
             self.snapshot = self.snapshot.persisted(
                 telegram_paired=telegram_paired,
-                current_project=None if current is None else current.name,
+                current_project=(
+                    "无项目会话"
+                    if conversation is not None and conversation.project_id is None
+                    else (
+                        current.name
+                        if current is not None
+                        and conversation is not None
+                        and current.id == conversation.project_id
+                        else None
+                    )
+                ),
                 active_project=None if active_project is None else active_project.name,
                 active_job_count=active_count,
                 active_job_status=active_status,
@@ -2329,6 +2924,11 @@ QLabel#subtitle, QLabel#pageSubtitle, QLabel#hint, QLabel#statusDetail {
 QFrame#signalRail { background: #E8EDF2; border-radius: 16px; }
 QFrame#statusStrip { background: #E9EFF4; border: 1px solid #DCE4EB; border-radius: 10px; }
 QFrame#page { background: #FFFFFF; border: 1px solid #DDE3E9; border-radius: 16px; }
+QFrame#systemGroup { background: transparent; border: 0; }
+QFrame#systemDivider { background: #E3E8ED; border: 0; }
+QLabel#sectionTitle { color: #263440; font-size: 14px; font-weight: 700; }
+QLabel#sectionHint { color: #71808F; font-size: 12px; }
+QLabel#sectionSummary { color: #607384; font-size: 12px; }
 QLabel#sectionLabel { color: #728096; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
 QLabel#statusTitle { font-weight: 600; }
 QLabel#statusDot { color: #8A96A3; font-size: 13px; }
@@ -2413,6 +3013,16 @@ QLabel#scopeStatus { background: #F1F6F4; color: #2F654F; border: 1px solid #D9E
 QLabel#bodyText { color: #465464; font-size: 13px; line-height: 1.5; }
 QLabel#fieldLabel { font-weight: 650; }
 QLabel#compactFieldLabel { color: #596878; font-size: 11px; font-weight: 650; }
+QLabel#sessionFilterLabel { color: #455667; font-size: 13px; font-weight: 650; }
+QLabel#sessionSummary { color: #3D715B; font-size: 12px; font-weight: 600;
+    padding: 0 2px; }
+QFrame#sessionActionBar { background: #F5F8FA; border: 1px solid #E0E6EB;
+    border-radius: 9px; }
+QPushButton[sessionAction="true"] { padding: 6px 11px; min-height: 20px; }
+QLabel#sessionActionStatus { color: #66727F; font-size: 11px; padding: 0 6px; }
+QLabel#sessionActionStatus[state="success"] { color: #2F7156; font-weight: 650; }
+QLabel#sessionActionStatus[state="attention"] { color: #8A5C22; font-weight: 600; }
+QLabel#sessionActionStatus[state="loading"] { color: #246AA5; font-weight: 600; }
 QLabel#pairingCode { color: #174A78; font-family: Menlo; font-size: 30px; font-weight: 700;
     letter-spacing: 4px; padding: 14px 0; }
 QLineEdit, QListWidget#projectList { background: #F7F9FB; color: #18202A;
@@ -2437,11 +3047,25 @@ QListWidget#projectList::item:hover { background: #EAF1F7; color: #18202A; }
 QListWidget#projectList::item:selected, QListWidget#projectList::item:selected:!active {
     background: #D5E5F6; color: #174A78; border: 1px solid #8AB6DE;
 }
+QTreeWidget#globalSessionList { background: #F7F9FB; color: #18202A;
+    selection-background-color: #D5E5F6; selection-color: #174A78;
+    border: 1px solid #CDD6DF; border-radius: 9px; padding: 5px; outline: 0; }
+QTreeWidget#globalSessionList::item { color: #18202A; padding: 6px 9px;
+    border-bottom: 1px solid #E3E8ED; border-radius: 6px; }
+QTreeWidget#globalSessionList::item:has-children { color: #5D6B78; font-weight: 600;
+    background: #EEF3F7; border-bottom: 0; margin-top: 4px; }
+QTreeWidget#globalSessionList::item:hover { background: #EAF1F7; }
+QTreeWidget#globalSessionList::item:selected { background: #D5E5F6; color: #174A78;
+    border: 1px solid #8AB6DE; }
 QPushButton { background: #EDF1F5; border: 1px solid #CDD6DF; border-radius: 8px;
     padding: 8px 13px; }
 QPushButton:hover { background: #E3EAF1; }
 QPushButton#primaryButton { background: #246AA5; color: white; border-color: #246AA5; }
 QPushButton#primaryButton:hover { background: #1C5A8D; }
+QPushButton#primaryButton:disabled { background: #DCE3E8; color: #87939E;
+    border-color: #DCE3E8; }
+QPushButton#secondaryButton:disabled { background: #F5F7F9; color: #A0A9B2;
+    border-color: #E2E7EB; }
 QPushButton:disabled { color: #9AA5AF; }
 """
 

@@ -171,6 +171,37 @@ async def test_relay_persists_turn_before_result_and_queues_delivery(tmp_path: P
         assert conversation is not None
         assert conversation.codex_thread_id == "thread-1"
         assert result.outbound_id is not None
+        sessions = await database.list_global_sessions()
+        assert len(sessions) == 1
+        assert sessions[0].thread_id == "thread-1"
+        assert sessions[0].conversation_id == conversation.id
+
+
+@pytest.mark.asyncio
+async def test_relay_executes_an_unassigned_conversation_in_controlled_mode(
+    tmp_path: Path,
+) -> None:
+    working_path = tmp_path / "notes"
+    working_path.mkdir()
+    async with Database(tmp_path / "state.db") as database:
+        conversation = await database.create_standalone_conversation(
+            working_path, title="Temporary work"
+        )
+        backend = FakeBackend()
+        service = RelayService(
+            database=database,
+            backend=backend,
+            sleep_inhibitor=FakeSleepInhibitor(),  # type: ignore[arg-type]
+        )
+
+        result = await service.run_current_conversation(text="hello")
+
+        assert result.conversation_id == conversation.id
+        assert backend.approval_mode is ProjectApprovalMode.SAFE
+        current = await database.current_global_conversation()
+        assert current is not None
+        assert current.id == conversation.id
+        assert current.project_id is None
 
 
 @pytest.mark.asyncio

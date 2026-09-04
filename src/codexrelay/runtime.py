@@ -21,6 +21,7 @@ from codexrelay.pairing import PairingService
 from codexrelay.paths import AppPaths
 from codexrelay.projects import ProjectService
 from codexrelay.secrets import SecretStore
+from codexrelay.session_sync import SessionSynchronizer
 from codexrelay.settings import Settings, SettingsStore
 from codexrelay.sleep import SleepInhibitor
 
@@ -227,29 +228,8 @@ class CodexRelayRuntime:
     async def _sync_registered_projects(
         database: Database, backend: AppServerBackend
     ) -> None:
-        if await database.active_job_count():
-            return
-        current_project = await database.current_project()
-        for project in await database.list_projects():
-            try:
-                threads = await backend.list_project_threads(project.path)
-                await database.archive_missing_codex_conversations(
-                    project.id,
-                    {thread.thread_id for thread in threads},
-                )
-                for thread in threads:
-                    await database.register_external_conversation(
-                        project.id,
-                        codex_thread_id=thread.thread_id,
-                        title=thread.title,
-                        source=thread.source,
-                    )
-            except Exception as error:
-                # A failed sync must never hide the last known local session.
-                LOGGER.warning(
-                    "could not reconcile Codex conversations for %s: %s",
-                    project.path,
-                    error,
-                )
-        if current_project is not None:
-            await database.select_first_available_conversation(current_project.id)
+        try:
+            await SessionSynchronizer(database, backend).sync_all()
+        except Exception as error:
+            # A failed complete listing must never hide the last known snapshot.
+            LOGGER.warning("could not reconcile Codex conversations: %s", error)

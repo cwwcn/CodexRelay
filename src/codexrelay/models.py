@@ -16,7 +16,9 @@ class JobStatus(StrEnum):
     ABANDONED = "abandoned"
 
 
-ACTIVE_JOB_STATUSES = frozenset({JobStatus.STARTING, JobStatus.RUNNING, JobStatus.WAITING_APPROVAL})
+ACTIVE_JOB_STATUSES = frozenset(
+    {JobStatus.QUEUED, JobStatus.STARTING, JobStatus.RUNNING, JobStatus.WAITING_APPROVAL}
+)
 
 
 class MessageRole(StrEnum):
@@ -57,6 +59,29 @@ class Conversation:
     is_pinned: bool
     archived_at: str | None
     lock_owner: str | None
+    cwd: Path | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class GlobalSession:
+    thread_id: str
+    title: str
+    cwd: Path
+    source: str
+    codex_updated_at: int
+    is_active: bool
+    project_id: str | None
+    project_name: str | None
+    project_enabled: bool
+    conversation_id: str | None
+    is_current_project: bool
+    is_current_conversation: bool
+    path_available: bool
+    archived_at: str | None
+
+    @property
+    def is_unassigned(self) -> bool:
+        return self.project_id is None
 
 
 @dataclass(frozen=True, slots=True)

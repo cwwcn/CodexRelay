@@ -58,6 +58,9 @@ class DesktopThreadBackend:
         del project
         return list(self.threads)
 
+    async def list_all_threads(self) -> list[DesktopThread]:
+        return list(self.threads)
+
 
 class ImageTelegramClient:
     async def get_file_path(self, file_id: str) -> str:
@@ -326,7 +329,7 @@ async def test_sessions_syncs_desktop_threads_idempotently_and_selects_one(
         reply = await cursor.fetchone()
         assert reply is not None
         payload = str(reply["payload_json"])
-        assert "当前项目会话（2）" in payload
+        assert "全部会话（2）" in payload
         assert "尚未生成 Codex Thread" not in payload
         assert "路径已迁移" not in payload
         assert "电脑端相关会话" in payload
@@ -382,7 +385,7 @@ async def test_sessions_hides_desktop_conversation_deleted_on_computer(
         pending = await database.pending_outbound_messages(
             connector_type="telegram", account_id="main-bot"
         )
-        assert "当前项目还没有会话" in pending[-1].payload_json
+        assert "暂未发现可用的 Codex 会话" in pending[-1].payload_json
 
 
 @pytest.mark.asyncio
@@ -434,6 +437,83 @@ async def test_sessions_hides_any_codex_conversation_deleted_externally(
         assert len(restored) == 1
         assert restored[0].id == conversation_id
         assert restored[0].archived_at is None
+
+
+@pytest.mark.asyncio
+async def test_sessions_all_groups_project_and_unassigned_codex_threads(
+    tmp_path: Path,
+) -> None:
+    project_path = tmp_path / "project"
+    unassigned_path = tmp_path / "notes"
+    project_path.mkdir()
+    unassigned_path.mkdir()
+    async with Database(tmp_path / "state.db") as database:
+        await database.add_project(project_path, "Relay")
+        await authorize(database)
+        backend = DesktopThreadBackend(
+            [
+                DesktopThread("project-thread", "项目会话", project_path, updated_at=2),
+                DesktopThread("loose-thread", "随手会话", unassigned_path, updated_at=1),
+            ]
+        )
+        router = TelegramRouter(
+            database=database,
+            client=cast(TelegramClient, UnusedTelegramClient()),
+            relay=cast(RelayService, UnusedRelay()),
+            pairing=PairingService(database),
+            project_service=ProjectService(database),
+            temporary_directory=tmp_path / "temp",
+            codex_backend=cast(Any, backend),
+        )
+
+        await router.handle("event-all-sessions", message("/sessions all"))
+
+        pending = await database.pending_outbound_messages(
+            connector_type="telegram", account_id="main-bot"
+        )
+        payload = pending[-1].payload_json
+        assert "全部会话（2）" in payload
+        assert "Relay" in payload
+        assert "未归属" in payload
+        assert "项目会话" in payload
+        assert "随手会话" in payload
+        assert "Mac 端明确归属" in payload
+
+
+@pytest.mark.asyncio
+async def test_session_command_can_select_unassigned_conversation(
+    tmp_path: Path,
+) -> None:
+    project_path = tmp_path / "project"
+    unassigned_path = tmp_path / "notes"
+    project_path.mkdir()
+    unassigned_path.mkdir()
+    async with Database(tmp_path / "state.db") as database:
+        await database.add_project(project_path, "Relay")
+        await authorize(database)
+        backend = DesktopThreadBackend(
+            [
+                DesktopThread("project-thread", "Project task", project_path, updated_at=2),
+                DesktopThread("loose-thread", "Loose task", unassigned_path, updated_at=1),
+            ]
+        )
+        router = TelegramRouter(
+            database=database,
+            client=cast(TelegramClient, UnusedTelegramClient()),
+            relay=cast(RelayService, UnusedRelay()),
+            pairing=PairingService(database),
+            project_service=ProjectService(database),
+            temporary_directory=tmp_path / "temp",
+            codex_backend=cast(Any, backend),
+        )
+
+        await router.handle("event-select-unassigned", message("/session 2"))
+
+        current = await database.current_global_conversation()
+        assert current is not None
+        assert current.codex_thread_id == "loose-thread"
+        assert current.project_id is None
+        assert await database.current_project() is None
 
 
 def test_task_error_message_explains_desktop_writer_conflict() -> None:

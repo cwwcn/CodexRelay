@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import hashlib
 import json
 import uuid
@@ -12,9 +13,11 @@ from typing import Any
 
 import aiosqlite
 
+from codexrelay.codex.base import DesktopThread
 from codexrelay.models import (
     CanonicalMessage,
     Conversation,
+    GlobalSession,
     JobStatus,
     MessageRole,
     OutboundMessage,
@@ -22,7 +25,7 @@ from codexrelay.models import (
     ProjectApprovalMode,
 )
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 9
 
 MIGRATION_1 = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -230,6 +233,64 @@ MIGRATION_7 = """
 ALTER TABLE app_state ADD COLUMN current_conversation_id TEXT NULL;
 """
 
+MIGRATION_8 = """
+CREATE TABLE IF NOT EXISTS discovered_threads (
+    codex_thread_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    cwd TEXT NOT NULL,
+    source TEXT NOT NULL,
+    codex_updated_at INTEGER NOT NULL DEFAULT 0,
+    is_active INTEGER NOT NULL DEFAULT 0 CHECK(is_active IN (0, 1)),
+    project_id TEXT NULL REFERENCES projects(id) ON DELETE SET NULL,
+    conversation_id TEXT NULL REFERENCES conversations(id) ON DELETE SET NULL,
+    path_available INTEGER NOT NULL DEFAULT 0 CHECK(path_available IN (0, 1)),
+    archived_at TEXT NULL,
+    last_seen_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_discovered_threads_project
+ON discovered_threads(project_id, archived_at, codex_updated_at);
+CREATE INDEX IF NOT EXISTS idx_discovered_threads_conversation
+ON discovered_threads(conversation_id);
+"""
+
+MIGRATION_9 = """
+CREATE TABLE conversations_new (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NULL REFERENCES projects(id) ON DELETE SET NULL,
+    codex_thread_id TEXT NULL,
+    title TEXT NOT NULL,
+    status TEXT NOT NULL,
+    last_message_id TEXT NULL,
+    model TEXT NULL,
+    reasoning_effort TEXT NULL,
+    scope TEXT NOT NULL DEFAULT 'project',
+    source TEXT NOT NULL DEFAULT 'telegram',
+    last_used_at TEXT NOT NULL DEFAULT '',
+    is_pinned INTEGER NOT NULL DEFAULT 0,
+    archived_at TEXT NULL,
+    lock_owner TEXT NULL,
+    cwd TEXT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+INSERT INTO conversations_new(
+    id, project_id, codex_thread_id, title, status, last_message_id,
+    model, reasoning_effort, scope, source, last_used_at, is_pinned,
+    archived_at, lock_owner, created_at, updated_at
+)
+SELECT id, project_id, codex_thread_id, title, status, last_message_id,
+       model, reasoning_effort, scope, source, last_used_at, is_pinned,
+       archived_at, lock_owner, created_at, updated_at
+FROM conversations;
+DROP TABLE conversations;
+ALTER TABLE conversations_new RENAME TO conversations;
+UPDATE conversations
+SET cwd=(SELECT path FROM projects WHERE projects.id=conversations.project_id)
+WHERE cwd IS NULL AND project_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_conversations_project
+ON conversations(project_id, archived_at, last_used_at);
+"""
+
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds")
@@ -252,14 +313,32 @@ class Database:
 
     async def open(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self._connection = await aiosqlite.connect(self.path)
-        self._connection.row_factory = aiosqlite.Row
-        await self._connection.execute("PRAGMA foreign_keys=ON")
-        await self._connection.execute("PRAGMA busy_timeout=5000")
-        await self._connection.execute("PRAGMA journal_mode=WAL")
-        await self._connection.execute("PRAGMA auto_vacuum=INCREMENTAL")
-        await self._migrate()
+        async with self._migration_guard():
+            try:
+                self._connection = await aiosqlite.connect(self.path)
+                self._connection.row_factory = aiosqlite.Row
+                await self._connection.execute("PRAGMA foreign_keys=ON")
+                await self._connection.execute("PRAGMA busy_timeout=5000")
+                await self._connection.execute("PRAGMA journal_mode=WAL")
+                await self._connection.execute("PRAGMA auto_vacuum=INCREMENTAL")
+                await self._migrate()
+            except BaseException:
+                await self.close()
+                raise
         self.path.chmod(0o600)
+
+    @asynccontextmanager
+    async def _migration_guard(self) -> AsyncIterator[None]:
+        """Serialize schema setup across runtime and short-lived UI connections."""
+        lock_path = self.path.with_name(f"{self.path.name}.migration.lock")
+        lock_file = lock_path.open("a+", encoding="utf-8")
+        try:
+            await asyncio.to_thread(fcntl.flock, lock_file.fileno(), fcntl.LOCK_EX)
+            lock_path.chmod(0o600)
+            yield
+        finally:
+            await asyncio.to_thread(fcntl.flock, lock_file.fileno(), fcntl.LOCK_UN)
+            lock_file.close()
 
     async def close(self) -> None:
         if self._connection is not None:
@@ -402,6 +481,27 @@ class Database:
             )
             await connection.execute("INSERT INTO schema_version(version) VALUES (?)", (7,))
             await connection.commit()
+            version = 7
+        if version < 8:
+            await connection.executescript(MIGRATION_8)
+            await connection.execute("INSERT INTO schema_version(version) VALUES (?)", (8,))
+            await connection.commit()
+            version = 8
+        if version < 9:
+            # SQLite cannot make the legacy project_id column nullable in
+            # place. Keep all existing rows and rebuild only this table.
+            await connection.execute("PRAGMA foreign_keys=OFF")
+            await connection.execute("PRAGMA legacy_alter_table=ON")
+            try:
+                await connection.executescript(MIGRATION_9)
+                await connection.execute("INSERT INTO schema_version(version) VALUES (?)", (9,))
+                await connection.commit()
+            except BaseException:
+                await connection.rollback()
+                raise
+            finally:
+                await connection.execute("PRAGMA legacy_alter_table=OFF")
+                await connection.execute("PRAGMA foreign_keys=ON")
 
     async def add_project(self, path: Path, name: str | None = None) -> Project:
         resolved = path.expanduser().resolve(strict=True)
@@ -425,7 +525,8 @@ class Database:
                 (project_id, project_name, str(resolved), now, now),
             )
             cursor = await connection.execute(
-                "SELECT current_project_id FROM app_state WHERE singleton=1"
+                "SELECT current_project_id, current_conversation_id "
+                "FROM app_state WHERE singleton=1"
             )
             state = await cursor.fetchone()
             cursor = await connection.execute(
@@ -435,7 +536,10 @@ class Database:
             if state is None or stored is None:
                 raise RuntimeError("failed to read project state after insert")
             stored_id = str(stored["id"])
-            if state["current_project_id"] is None:
+            if (
+                state["current_project_id"] is None
+                and state["current_conversation_id"] is None
+            ):
                 await connection.execute(
                     "UPDATE app_state SET current_project_id=? WHERE singleton=1", (stored_id,)
                 )
@@ -451,6 +555,17 @@ class Database:
             FROM projects p CROSS JOIN app_state s
             WHERE p.enabled=1
             ORDER BY lower(p.name), p.path
+            """
+        )
+        return [self._project_from_row(row) for row in await cursor.fetchall()]
+
+    async def list_all_projects(self) -> list[Project]:
+        """Return enabled and disabled projects for global session classification."""
+        cursor = await self.connection.execute(
+            """
+            SELECT p.*, CASE WHEN s.current_project_id=p.id THEN 1 ELSE 0 END AS is_current
+            FROM projects p CROSS JOIN app_state s
+            ORDER BY p.enabled DESC, lower(p.name), p.path
             """
         )
         return [self._project_from_row(row) for row in await cursor.fetchall()]
@@ -523,8 +638,13 @@ class Database:
             raise ValueError("project is not registered or is disabled")
         async with self.transaction() as connection:
             cursor = await connection.execute(
-                "SELECT COUNT(*) AS count FROM jobs WHERE status IN (?, ?, ?)",
-                (JobStatus.STARTING, JobStatus.RUNNING, JobStatus.WAITING_APPROVAL),
+                "SELECT COUNT(*) AS count FROM jobs WHERE status IN (?, ?, ?, ?)",
+                (
+                    JobStatus.QUEUED,
+                    JobStatus.STARTING,
+                    JobStatus.RUNNING,
+                    JobStatus.WAITING_APPROVAL,
+                ),
             )
             row = await cursor.fetchone()
             if row is None:
@@ -611,8 +731,13 @@ class Database:
         now = utc_now()
         async with self.transaction() as connection:
             cursor = await connection.execute(
-                "SELECT COUNT(*) AS count FROM jobs WHERE status IN (?, ?, ?)",
-                (JobStatus.STARTING, JobStatus.RUNNING, JobStatus.WAITING_APPROVAL),
+                "SELECT COUNT(*) AS count FROM jobs WHERE status IN (?, ?, ?, ?)",
+                (
+                    JobStatus.QUEUED,
+                    JobStatus.STARTING,
+                    JobStatus.RUNNING,
+                    JobStatus.WAITING_APPROVAL,
+                ),
             )
             active = await cursor.fetchone()
             if active is None:
@@ -823,6 +948,7 @@ class Database:
         reasoning_effort: str | None = None,
         scope: str = "project",
         source: str = "telegram",
+        cwd: Path | None = None,
     ) -> str:
         conversation_id = str(uuid.uuid4())
         now = utc_now()
@@ -831,8 +957,8 @@ class Database:
                 """
                 INSERT INTO conversations(
                     id, project_id, title, status, model, reasoning_effort,
-                    scope, source, last_used_at, created_at, updated_at
-                ) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)
+                    scope, source, last_used_at, created_at, updated_at, cwd
+                ) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     conversation_id,
@@ -845,6 +971,7 @@ class Database:
                     now,
                     now,
                     now,
+                    None if cwd is None else str(cwd.expanduser().resolve()),
                 ),
             )
         return conversation_id
@@ -877,18 +1004,44 @@ class Database:
         row = await cursor.fetchone()
         return None if row is None else self._conversation_from_row(row)
 
-    async def select_conversation(self, conversation_id: str, project_id: str) -> Conversation:
+    async def current_global_conversation(self) -> Conversation | None:
+        """Return the selected conversation regardless of project ownership."""
+        cursor = await self.connection.execute(
+            """SELECT c.id, c.project_id, c.codex_thread_id, c.title, c.status,
+                      c.last_message_id, c.model, c.reasoning_effort, c.scope,
+                      c.source, c.last_used_at, c.is_pinned, c.archived_at,
+                      c.lock_owner, c.cwd
+               FROM conversations c JOIN app_state s
+                 ON s.current_conversation_id=c.id
+               WHERE c.archived_at IS NULL"""
+        )
+        row = await cursor.fetchone()
+        return None if row is None else self._conversation_from_row(row)
+
+    async def select_conversation(
+        self, conversation_id: str, project_id: str | None = None
+    ) -> Conversation:
         now = utc_now()
         async with self.transaction() as connection:
-            cursor = await connection.execute(
-                "SELECT id FROM conversations WHERE id=? AND project_id=? AND archived_at IS NULL",
-                (conversation_id, project_id),
-            )
-            if await cursor.fetchone() is None:
+            if project_id is None:
+                cursor = await connection.execute(
+                    "SELECT id, project_id FROM conversations "
+                    "WHERE id=? AND archived_at IS NULL",
+                    (conversation_id,),
+                )
+            else:
+                cursor = await connection.execute(
+                    "SELECT id, project_id FROM conversations "
+                    "WHERE id=? AND project_id=? AND archived_at IS NULL",
+                    (conversation_id, project_id),
+                )
+            row = await cursor.fetchone()
+            if row is None:
                 raise RuntimeError("会话不存在或已归档")
             await connection.execute(
-                "UPDATE app_state SET current_conversation_id=? WHERE singleton=1",
-                (conversation_id,),
+                "UPDATE app_state SET current_project_id=?, current_conversation_id=? "
+                "WHERE singleton=1",
+                (row["project_id"], conversation_id),
             )
             await connection.execute(
                 "UPDATE conversations SET last_used_at=?, updated_at=? WHERE id=?",
@@ -942,9 +1095,17 @@ class Database:
         if existing is not None:
             async with self.transaction() as connection:
                 await connection.execute(
-                    "UPDATE app_state SET current_conversation_id=? WHERE singleton=1",
-                    (existing.id,),
+                    "UPDATE app_state SET current_project_id=?, current_conversation_id=? "
+                    "WHERE singleton=1",
+                    (project_id, existing.id),
                 )
+                if existing.cwd is None:
+                    project = await self.get_project(project_id)
+                    if project is not None:
+                        await connection.execute(
+                            "UPDATE conversations SET cwd=? WHERE id=?",
+                            (str(project.path), existing.id),
+                        )
             return existing
         conversation_id = await self.create_conversation(project_id, title)
         async with self.transaction() as connection:
@@ -957,13 +1118,51 @@ class Database:
             raise RuntimeError("failed to create active conversation")
         return created
 
+    async def list_all_conversations(self) -> list[Conversation]:
+        cursor = await self.connection.execute(
+            """SELECT id, project_id, codex_thread_id, title, status, last_message_id,
+                      model, reasoning_effort, scope, source, last_used_at,
+                      is_pinned, archived_at, lock_owner, cwd
+               FROM conversations
+               WHERE archived_at IS NULL
+               ORDER BY is_pinned DESC, last_used_at DESC, created_at DESC"""
+        )
+        return [self._conversation_from_row(row) for row in await cursor.fetchall()]
+
+    async def create_standalone_conversation(
+        self, cwd: Path, title: str = "临时会话", source: str = "telegram"
+    ) -> Conversation:
+        resolved = cwd.expanduser().resolve(strict=True)
+        if not resolved.is_dir():
+            raise ValueError("会话工作目录不是有效目录")
+        conversation_id = await self.create_conversation(
+            None,
+            title,
+            scope="standalone",
+            source=source,
+            cwd=resolved,
+        )
+        await self.select_conversation(conversation_id)
+        selected = await self.conversation(conversation_id)
+        if selected is None:
+            raise RuntimeError("独立会话创建后无法读取")
+        return selected
+
     async def start_new_conversation(self, project_id: str, title: str) -> Conversation:
         conversation_id = str(uuid.uuid4())
         now = utc_now()
+        project = await self.get_project(project_id)
+        if project is None or not project.enabled:
+            raise RuntimeError("项目不存在或已停用。")
         async with self.transaction() as connection:
             cursor = await connection.execute(
-                "SELECT COUNT(*) AS count FROM jobs WHERE status IN (?, ?, ?)",
-                (JobStatus.STARTING, JobStatus.RUNNING, JobStatus.WAITING_APPROVAL),
+                "SELECT COUNT(*) AS count FROM jobs WHERE status IN (?, ?, ?, ?)",
+                (
+                    JobStatus.QUEUED,
+                    JobStatus.STARTING,
+                    JobStatus.RUNNING,
+                    JobStatus.WAITING_APPROVAL,
+                ),
             )
             active = await cursor.fetchone()
             if active is None:
@@ -983,8 +1182,8 @@ class Database:
                 """
                 INSERT INTO conversations(
                     id, project_id, title, status, model, reasoning_effort,
-                    scope, source, last_used_at, created_at, updated_at
-                ) VALUES (?, ?, ?, 'active', ?, ?, 'project', 'telegram', ?, ?, ?)
+                    scope, source, last_used_at, created_at, updated_at, cwd
+                ) VALUES (?, ?, ?, 'active', ?, ?, 'project', 'telegram', ?, ?, ?, ?)
                 """,
                 (
                     conversation_id,
@@ -995,6 +1194,7 @@ class Database:
                     now,
                     now,
                     now,
+                    str(project.path),
                 ),
             )
             await connection.execute(
@@ -1011,7 +1211,7 @@ class Database:
             """
             SELECT id, project_id, codex_thread_id, title, status, last_message_id,
                    model, reasoning_effort, scope, source, last_used_at,
-                   is_pinned, archived_at, lock_owner
+                   is_pinned, archived_at, lock_owner, cwd
             FROM conversations WHERE id=?
             """,
             (conversation_id,),
@@ -1023,13 +1223,305 @@ class Database:
         cursor = await self.connection.execute(
             """SELECT id, project_id, codex_thread_id, title, status, last_message_id,
                       model, reasoning_effort, scope, source, last_used_at,
-                      is_pinned, archived_at, lock_owner
+                      is_pinned, archived_at, lock_owner, cwd
                FROM conversations
                WHERE project_id=? AND archived_at IS NULL
-               ORDER BY is_pinned DESC, last_used_at DESC, created_at DESC""",
+               ORDER BY is_pinned DESC,
+                        COALESCE(
+                            (SELECT d.codex_updated_at FROM discovered_threads d
+                             WHERE d.conversation_id=conversations.id), 0
+                        ) DESC,
+                        last_used_at DESC, created_at DESC""",
             (project_id,),
         )
         return [self._conversation_from_row(row) for row in await cursor.fetchall()]
+
+    async def reconcile_global_threads(self, threads: list[DesktopThread]) -> None:
+        """Refresh the global Codex thread index after a successful complete listing.
+
+        Exact cwd matches are assigned to registered projects.  Everything else
+        remains visible but unassigned, so discovery never grants project access.
+        Missing threads are recoverably archived rather than deleted.
+        """
+        if await self.active_job_count():
+            return
+        projects = await self.list_all_projects()
+        project_by_id = {project.id: project for project in projects}
+        project_roots = sorted(
+            (
+                (project.path.expanduser().resolve(), project)
+                for project in projects
+            ),
+            key=lambda item: len(item[0].parts),
+            reverse=True,
+        )
+        seen: set[str] = set()
+        now = utc_now()
+        async with self.transaction() as connection:
+            # Re-check after BEGIN IMMEDIATE. A task may have started while
+            # the complete Codex listing was in flight; preserve the current
+            # snapshot and let the next scheduled sync retry in that case.
+            cursor = await connection.execute(
+                """SELECT COUNT(*) AS count FROM jobs
+                   WHERE status IN (?, ?, ?, ?)""",
+                (
+                    JobStatus.QUEUED,
+                    JobStatus.STARTING,
+                    JobStatus.RUNNING,
+                    JobStatus.WAITING_APPROVAL,
+                ),
+            )
+            active = await cursor.fetchone()
+            if active is None:
+                raise RuntimeError("无法确认当前任务状态")
+            if int(active["count"]):
+                return
+            for value in threads:
+                thread_id = value.thread_id
+                title = value.title.strip() or "未命名会话"
+                cwd = value.cwd.expanduser()
+                resolved_cwd = cwd.resolve()
+                project = next(
+                    (
+                        candidate
+                        for root, candidate in project_roots
+                        if _is_within(resolved_cwd, root)
+                    ),
+                    None,
+                )
+                cursor = await connection.execute(
+                    """SELECT project_id, id, scope FROM conversations
+                       WHERE codex_thread_id=?
+                       ORDER BY CASE WHEN project_id IS NOT NULL THEN 1 ELSE 0 END DESC,
+                                archived_at IS NULL DESC,
+                                last_used_at DESC, updated_at DESC LIMIT 1""",
+                    (thread_id,),
+                )
+                binding = await cursor.fetchone()
+                if binding is not None:
+                    bound_project = project_by_id.get(str(binding["project_id"]))
+                    if bound_project is not None:
+                        project = bound_project
+                    elif binding["project_id"] is None and binding["scope"] == "standalone":
+                        # A standalone conversation is an explicit user choice.
+                        # Keep it unassigned even when its cwd happens to sit
+                        # under a registered project root; only an explicit
+                        # UI assignment may change that association.
+                        project = None
+                # A project association is an authorization boundary, not a
+                # label. If a previously assigned thread reports a cwd outside
+                # that boundary (for example after a folder move), retain the
+                # thread in the index for diagnosis but execute from the
+                # authorized project root until the user explicitly changes
+                # the association.
+                conversation_cwd = resolved_cwd
+                if project is not None:
+                    project_root = project.path.expanduser().resolve()
+                    if not _is_within(resolved_cwd, project_root):
+                        conversation_cwd = project_root
+                source = value.source
+                updated_at = value.updated_at
+                is_active = value.is_active
+                path_available = cwd.is_dir()
+                conversation_id = str(binding["id"]) if binding is not None else None
+                if project is not None and conversation_id is None:
+                    cursor = await connection.execute(
+                        """SELECT id FROM conversations
+                           WHERE project_id=? AND codex_thread_id=?
+                           LIMIT 1""",
+                        (project.id, thread_id),
+                    )
+                    row = await cursor.fetchone()
+                    if row is not None:
+                        conversation_id = str(row["id"])
+                if project is None and conversation_id is None:
+                    conversation_id = str(uuid.uuid4())
+                    await connection.execute(
+                        """INSERT INTO conversations(
+                               id, project_id, codex_thread_id, title, status, source,
+                               scope, last_used_at, created_at, updated_at, cwd
+                           ) VALUES (?, NULL, ?, ?, 'active', ?, 'standalone', ?, ?, ?, ?)""",
+                        (
+                            conversation_id,
+                            thread_id,
+                            title[:120],
+                            source,
+                            now,
+                            now,
+                            now,
+                            str(conversation_cwd),
+                        ),
+                    )
+                await connection.execute(
+                    """
+                    INSERT INTO discovered_threads(
+                        codex_thread_id, title, cwd, source, codex_updated_at,
+                        is_active, project_id, conversation_id, path_available,
+                        archived_at, last_seen_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+                    ON CONFLICT(codex_thread_id) DO UPDATE SET
+                        title=excluded.title,
+                        cwd=excluded.cwd,
+                        source=excluded.source,
+                        codex_updated_at=excluded.codex_updated_at,
+                        is_active=excluded.is_active,
+                        project_id=excluded.project_id,
+                        conversation_id=excluded.conversation_id,
+                        path_available=excluded.path_available,
+                        archived_at=NULL,
+                        last_seen_at=excluded.last_seen_at
+                    """,
+                    (
+                        thread_id,
+                        title[:120],
+                        str(cwd),
+                        source,
+                        updated_at,
+                        int(is_active),
+                        None if project is None else project.id,
+                        conversation_id,
+                        int(path_available),
+                        now,
+                    ),
+                )
+                # A thread may have an old unassigned discovery row and a
+                # later explicit project binding. Keep the canonical
+                # conversation row in sync with the currently observed
+                # thread, including restoring a previously archived binding.
+                if conversation_id is not None:
+                    await connection.execute(
+                        """UPDATE conversations
+                           SET project_id=?, title=?, source=?, cwd=?,
+                               archived_at=NULL, status='active', updated_at=?
+                           WHERE id=?""",
+                        (
+                            None if project is None else project.id,
+                            title[:120],
+                            source,
+                            str(conversation_cwd),
+                            now,
+                            conversation_id,
+                        ),
+                    )
+                seen.add(thread_id)
+            query = (
+                "UPDATE discovered_threads SET archived_at=?, is_active=0 "
+                "WHERE archived_at IS NULL"
+            )
+            parameters: list[str] = [now]
+            if seen:
+                placeholders = ",".join("?" for _ in seen)
+                query += f" AND codex_thread_id NOT IN ({placeholders})"
+                parameters.extend(sorted(seen))
+            await connection.execute(query, parameters)
+            # Reconcile conversation rows as well as the discovery index. This
+            # is especially important for standalone (unassigned) sessions:
+            # when a thread is deleted in Codex, the selected local
+            # conversation must not remain a phantom current session.
+            archive_query = (
+                "UPDATE conversations SET archived_at=?, lock_owner=NULL "
+                "WHERE archived_at IS NULL AND codex_thread_id IS NOT NULL "
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM jobs WHERE jobs.conversation_id=conversations.id "
+                "AND jobs.status IN (?, ?, ?, ?)"
+                ")"
+            )
+            archive_parameters: list[str] = [
+                now,
+                JobStatus.QUEUED,
+                JobStatus.STARTING,
+                JobStatus.RUNNING,
+                JobStatus.WAITING_APPROVAL,
+            ]
+            if seen:
+                placeholders = ",".join("?" for _ in seen)
+                archive_query += f" AND codex_thread_id NOT IN ({placeholders})"
+                archive_parameters.extend(sorted(seen))
+            await connection.execute(archive_query, archive_parameters)
+            await connection.execute(
+                """UPDATE app_state SET current_conversation_id=NULL
+                   WHERE singleton=1 AND current_conversation_id IN (
+                       SELECT id FROM conversations WHERE archived_at=?
+                   )""",
+                (now,),
+            )
+            await connection.execute(
+                """UPDATE app_state
+                   SET current_conversation_id=COALESCE(
+                       current_conversation_id,
+                       (SELECT d.conversation_id FROM discovered_threads d
+                        WHERE d.archived_at IS NULL
+                          AND d.project_id=app_state.current_project_id
+                        ORDER BY d.codex_updated_at DESC LIMIT 1),
+                       (SELECT d.conversation_id FROM discovered_threads d
+                        WHERE d.archived_at IS NULL
+                        ORDER BY d.codex_updated_at DESC LIMIT 1)
+                   )
+                   WHERE singleton=1 AND current_conversation_id IS NULL"""
+            )
+
+    async def list_global_sessions(
+        self, *, include_archived: bool = False
+    ) -> list[GlobalSession]:
+        archived_clause = "" if include_archived else "WHERE d.archived_at IS NULL"
+        cursor = await self.connection.execute(
+            f"""
+            SELECT d.*, p.name AS project_name, p.enabled AS project_enabled,
+                   CASE WHEN s.current_project_id=d.project_id THEN 1 ELSE 0 END
+                       AS is_current_project,
+                   CASE WHEN s.current_conversation_id=d.conversation_id THEN 1 ELSE 0 END
+                       AS is_current_conversation
+            FROM discovered_threads d
+            LEFT JOIN projects p ON p.id=d.project_id
+            CROSS JOIN app_state s
+            {archived_clause}
+            ORDER BY d.archived_at IS NOT NULL,
+                     is_current_project DESC,
+                     d.project_id IS NULL,
+                     lower(COALESCE(p.name, '')),
+                     d.codex_updated_at DESC,
+                     lower(d.title)
+            """
+        )
+        return [self._global_session_from_row(row) for row in await cursor.fetchall()]
+
+    async def assign_global_session(self, thread_id: str, project_id: str) -> Conversation:
+        """Explicitly bind a discovered thread to an already authorized project."""
+        if await self.active_job_count():
+            raise RuntimeError("任务运行期间不能修改会话归属。")
+        project = await self.get_project(project_id)
+        if project is None or not project.enabled:
+            raise RuntimeError("目标项目未授权或已停用。")
+        cursor = await self.connection.execute(
+            """SELECT title, source, archived_at FROM discovered_threads
+               WHERE codex_thread_id=?""",
+            (thread_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None or row["archived_at"] is not None:
+            raise RuntimeError("该 Codex 会话已经不存在或已归档。")
+        cursor = await self.connection.execute(
+            "SELECT project_id FROM discovered_threads WHERE codex_thread_id=?",
+            (thread_id,),
+        )
+        assignment = await cursor.fetchone()
+        if assignment is not None and assignment["project_id"] not in (None, project_id):
+            raise RuntimeError("该会话已经归属于其他项目。")
+        conversation = await self.register_external_conversation(
+            project.id,
+            codex_thread_id=thread_id,
+            title=str(row["title"]),
+            source=str(row["source"]),
+            allow_rebind=True,
+        )
+        async with self.transaction() as connection:
+            await connection.execute(
+                """UPDATE discovered_threads
+                   SET project_id=?, conversation_id=?
+                   WHERE codex_thread_id=?""",
+                (project.id, conversation.id, thread_id),
+            )
+        return conversation
 
     async def archive_missing_codex_conversations(
         self, project_id: str, present_thread_ids: set[str]
@@ -1049,12 +1541,13 @@ class Database:
                 "AND codex_thread_id IS NOT NULL "
                 "AND NOT EXISTS ("
                 "SELECT 1 FROM jobs WHERE jobs.conversation_id=conversations.id "
-                "AND jobs.status IN (?, ?, ?)"
+                "AND jobs.status IN (?, ?, ?, ?)"
                 ")"
             )
             parameters = [
                 now,
                 project_id,
+                JobStatus.QUEUED,
                 JobStatus.STARTING,
                 JobStatus.RUNNING,
                 JobStatus.WAITING_APPROVAL,
@@ -1100,67 +1593,189 @@ class Database:
 
     async def register_external_conversation(
         self,
-        project_id: str,
+        project_id: str | None,
         *,
         codex_thread_id: str,
         title: str,
         source: str = "desktop",
+        cwd: Path | None = None,
+        allow_rebind: bool = False,
     ) -> Conversation:
         """Register a locally discovered Codex thread idempotently."""
         now = utc_now()
         clean_title = title.strip() or "未命名会话"
+        if cwd is None and project_id is not None:
+            project = await self.get_project(project_id)
+            cwd = None if project is None else project.path
         async with self.transaction() as connection:
+            # A Codex thread is the canonical conversation identity. Reuse one
+            # existing row, including an archived row, so rebinding cannot
+            # split its message history or model settings into duplicates.
             cursor = await connection.execute(
-                """SELECT id FROM conversations
-                   WHERE project_id=? AND codex_thread_id=? AND archived_at IS NULL
+                """SELECT id, project_id, source, archived_at FROM conversations
+                   WHERE codex_thread_id=?
+                   ORDER BY CASE WHEN project_id=? THEN 0
+                                 WHEN project_id IS NULL THEN 1
+                                 ELSE 2 END,
+                            archived_at IS NULL DESC,
+                            last_used_at DESC, updated_at DESC
                    LIMIT 1""",
-                (project_id, codex_thread_id),
+                (codex_thread_id, project_id),
             )
             row = await cursor.fetchone()
-            if row is None:
-                archived_cursor = await connection.execute(
-                    """SELECT id FROM conversations
-                       WHERE project_id=? AND codex_thread_id=?
-                       LIMIT 1""",
-                    (project_id, codex_thread_id),
-                )
-                archived_row = await archived_cursor.fetchone()
-                if archived_row is not None:
-                    conversation_id = str(archived_row["id"])
-                    await connection.execute(
-                        """UPDATE conversations
-                           SET title=?, source=?, archived_at=NULL, status='active',
-                               updated_at=?
-                           WHERE id=?""",
-                        (clean_title, source, now, conversation_id),
+            effective_project_id = project_id
+            effective_cwd = cwd
+            if row is not None:
+                existing_project_id = row["project_id"]
+                if (
+                    not allow_rebind
+                    and existing_project_id != project_id
+                    and not (
+                        existing_project_id is None
+                        and project_id is not None
+                        and str(row["source"]) in {"desktop", "desktop_migrated"}
                     )
-                else:
-                    conversation_id = str(uuid.uuid4())
-                    await connection.execute(
-                        """INSERT INTO conversations(
-                               id, project_id, codex_thread_id, title, status, source,
-                               scope, last_used_at, created_at, updated_at
-                           ) VALUES (?, ?, ?, ?, 'active', ?, 'project', ?, ?, ?)""",
-                        (
-                            conversation_id,
-                            project_id,
-                            codex_thread_id,
-                            clean_title,
-                            source,
-                            now,
-                            now,
-                            now,
-                        ),
+                ):
+                    # Automatic discovery never moves a thread away from an
+                    # explicit association (including an explicit standalone
+                    # choice). Only an explicit UI assignment may rebind it.
+                    effective_project_id = (
+                        str(existing_project_id) if existing_project_id is not None else None
                     )
-            else:
+                if cwd is None and effective_project_id is not None:
+                    project = await self.get_project(str(effective_project_id))
+                    cwd = None if project is None else project.path
+                effective_cwd = cwd
+                if effective_project_id is not None:
+                    project = await self.get_project(str(effective_project_id))
+                    if project is not None:
+                        project_root = project.path.expanduser().resolve()
+                        candidate = (
+                            project_root
+                            if cwd is None
+                            else cwd.expanduser().resolve()
+                        )
+                        effective_cwd = (
+                            candidate if _is_within(candidate, project_root) else project_root
+                        )
                 conversation_id = str(row["id"])
                 await connection.execute(
-                    "UPDATE conversations SET title=?, source=?, updated_at=? WHERE id=?",
-                    (clean_title, source, now, conversation_id),
+                    """UPDATE conversations
+                       SET project_id=?, title=?, source=?, scope=?, cwd=?,
+                           archived_at=NULL, status='active', updated_at=?
+                       WHERE id=?""",
+                    (
+                        effective_project_id,
+                        clean_title,
+                        source,
+                        "standalone" if effective_project_id is None else "project",
+                        (
+                            None
+                            if effective_cwd is None
+                            else str(effective_cwd.expanduser().resolve())
+                        ),
+                        now,
+                        conversation_id,
+                    ),
+                )
+            else:
+                conversation_id = str(uuid.uuid4())
+                effective_cwd = cwd
+                if effective_project_id is not None:
+                    project = await self.get_project(str(effective_project_id))
+                    if project is not None:
+                        project_root = project.path.expanduser().resolve()
+                        candidate = (
+                            project_root
+                            if cwd is None
+                            else cwd.expanduser().resolve()
+                        )
+                        effective_cwd = (
+                            candidate if _is_within(candidate, project_root) else project_root
+                        )
+                await connection.execute(
+                    """INSERT INTO conversations(
+                           id, project_id, codex_thread_id, title, status, source,
+                           scope, last_used_at, created_at, updated_at, cwd
+                       ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)""",
+                    (
+                        conversation_id,
+                        effective_project_id,
+                        codex_thread_id,
+                        clean_title,
+                        source,
+                        "standalone" if effective_project_id is None else "project",
+                        now,
+                        now,
+                        now,
+                        (
+                            None
+                            if effective_cwd is None
+                            else str(effective_cwd.expanduser().resolve())
+                        ),
+                    ),
+                )
+            await connection.execute(
+                """UPDATE discovered_threads
+                   SET project_id=?, conversation_id=?
+                   WHERE codex_thread_id=?""",
+                (effective_project_id, conversation_id, codex_thread_id),
+            )
+            if effective_cwd is not None:
+                await connection.execute(
+                    "UPDATE conversations SET cwd=? WHERE id=?",
+                    (str(effective_cwd.expanduser().resolve()), conversation_id),
                 )
         conversation = await self.conversation(conversation_id)
         if conversation is None:
             raise RuntimeError("external conversation disappeared after registration")
+        return conversation
+
+    async def activate_global_session(self, thread_id: str) -> Conversation:
+        """Switch the app to any available project or standalone session."""
+        if await self.active_job_count():
+            raise RuntimeError("任务运行期间不能切换会话。")
+        cursor = await self.connection.execute(
+            """
+            SELECT d.project_id, d.conversation_id, d.cwd, d.title, d.source, p.enabled
+            FROM discovered_threads d
+            LEFT JOIN projects p ON p.id=d.project_id
+            WHERE d.codex_thread_id=? AND d.archived_at IS NULL
+            """,
+            (thread_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            raise RuntimeError("该 Codex 会话已经不存在或已归档。")
+        if row["conversation_id"] is None:
+            registered = await self.register_external_conversation(
+                None,
+                codex_thread_id=thread_id,
+                title=str(row["title"]),
+                source=str(row["source"]),
+                cwd=Path(str(row["cwd"])),
+            )
+            conversation_id = registered.id
+        else:
+            conversation_id = str(row["conversation_id"])
+        if row["project_id"] is not None and not bool(row["enabled"]):
+            raise RuntimeError("会话所属项目已停用，请先重新授权项目。")
+        async with self.transaction() as connection:
+            if row["project_id"] is not None:
+                await self.reset_project_approval_policies(connection)
+            await connection.execute(
+                """UPDATE app_state
+                   SET current_project_id=?, current_conversation_id=?
+                   WHERE singleton=1""",
+                (row["project_id"], conversation_id),
+            )
+            await connection.execute(
+                "UPDATE conversations SET last_used_at=?, updated_at=? WHERE id=?",
+                (utc_now(), utc_now(), conversation_id),
+            )
+        conversation = await self.conversation(conversation_id)
+        if conversation is None:
+            raise RuntimeError("会话切换后无法读取。")
         return conversation
 
     async def set_active_conversation_model(
@@ -1171,14 +1786,27 @@ class Database:
         reasoning_effort: str,
         title: str = "CodexRelay",
     ) -> Conversation:
+        """Backward-compatible project-scoped model setter."""
+        current = await self.current_conversation(project_id)
+        if current is not None:
+            return await self.set_conversation_model(
+                current.id,
+                model=model,
+                reasoning_effort=reasoning_effort,
+            )
         if not model.strip() or not reasoning_effort.strip():
             raise ValueError("model and reasoning effort are required")
         conversation_id = str(uuid.uuid4())
         now = utc_now()
         async with self.transaction() as connection:
             cursor = await connection.execute(
-                "SELECT COUNT(*) AS count FROM jobs WHERE status IN (?, ?, ?)",
-                (JobStatus.STARTING, JobStatus.RUNNING, JobStatus.WAITING_APPROVAL),
+                "SELECT COUNT(*) AS count FROM jobs WHERE status IN (?, ?, ?, ?)",
+                (
+                    JobStatus.QUEUED,
+                    JobStatus.STARTING,
+                    JobStatus.RUNNING,
+                    JobStatus.WAITING_APPROVAL,
+                ),
             )
             active = await cursor.fetchone()
             if active is None:
@@ -1238,6 +1866,49 @@ class Database:
             raise RuntimeError("conversation disappeared after model update")
         return configured
 
+    async def set_conversation_model(
+        self,
+        conversation_id: str,
+        *,
+        model: str,
+        reasoning_effort: str,
+    ) -> Conversation:
+        """Set model settings on the selected conversation, with no project requirement."""
+        if not model.strip() or not reasoning_effort.strip():
+            raise ValueError("model and reasoning effort are required")
+        now = utc_now()
+        async with self.transaction() as connection:
+            cursor = await connection.execute(
+                "SELECT COUNT(*) AS count FROM jobs WHERE status IN (?, ?, ?, ?)",
+                (
+                    JobStatus.QUEUED,
+                    JobStatus.STARTING,
+                    JobStatus.RUNNING,
+                    JobStatus.WAITING_APPROVAL,
+                ),
+            )
+            active = await cursor.fetchone()
+            if active is None:
+                raise RuntimeError("无法确认当前任务状态")
+            if int(active["count"]):
+                raise RuntimeError("任务运行期间不能修改模型或推理强度。")
+            result = await connection.execute(
+                """UPDATE conversations
+                   SET model=?, reasoning_effort=?, last_used_at=?, updated_at=?
+                   WHERE id=? AND archived_at IS NULL""",
+                (model, reasoning_effort, now, now, conversation_id),
+            )
+            if result.rowcount != 1:
+                raise RuntimeError("当前会话不存在或已归档。")
+            await connection.execute(
+                "UPDATE app_state SET current_conversation_id=? WHERE singleton=1",
+                (conversation_id,),
+            )
+        configured = await self.conversation(conversation_id)
+        if configured is None:
+            raise RuntimeError("conversation disappeared after model update")
+        return configured
+
     async def mark_job_starting(self, job_id: str) -> None:
         async with self.transaction() as connection:
             result = await connection.execute(
@@ -1254,7 +1925,12 @@ class Database:
         now = utc_now()
         async with self.transaction() as connection:
             cursor = await connection.execute(
-                "SELECT conversation_id FROM jobs WHERE id=? AND status=?",
+                """SELECT j.conversation_id, c.project_id, c.title, c.source,
+                          COALESCE(c.cwd, p.path) AS cwd
+                   FROM jobs j
+                   JOIN conversations c ON c.id=j.conversation_id
+                   LEFT JOIN projects p ON p.id=c.project_id
+                   WHERE j.id=? AND j.status=?""",
                 (job_id, JobStatus.STARTING),
             )
             row = await cursor.fetchone()
@@ -1272,6 +1948,40 @@ class Database:
                 """,
                 (thread_id, now, row["conversation_id"]),
             )
+            cwd = row["cwd"]
+            if cwd is None:
+                raise RuntimeError("conversation has no working directory")
+            path_available = Path(str(cwd)).expanduser().is_dir()
+            codex_updated_at = int(datetime.now(UTC).timestamp())
+            await connection.execute(
+                """INSERT INTO discovered_threads(
+                       codex_thread_id, title, cwd, source, codex_updated_at,
+                       is_active, project_id, conversation_id, path_available,
+                       archived_at, last_seen_at
+                   ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, NULL, ?)
+                   ON CONFLICT(codex_thread_id) DO UPDATE SET
+                       title=excluded.title,
+                       cwd=excluded.cwd,
+                       source=excluded.source,
+                       codex_updated_at=excluded.codex_updated_at,
+                       is_active=1,
+                       project_id=excluded.project_id,
+                       conversation_id=excluded.conversation_id,
+                       path_available=excluded.path_available,
+                       archived_at=NULL,
+                       last_seen_at=excluded.last_seen_at""",
+                (
+                    thread_id,
+                    str(row["title"]).strip() or "未命名会话",
+                    str(cwd),
+                    str(row["source"]),
+                    codex_updated_at,
+                    row["project_id"],
+                    row["conversation_id"],
+                    int(path_available),
+                    now,
+                ),
+            )
 
     async def fail_job(self, job_id: str, error_message: str) -> None:
         async with self.transaction() as connection:
@@ -1279,13 +1989,14 @@ class Database:
                 """
                 UPDATE jobs
                 SET status=?, finished_at=?, error_message=?
-                WHERE id=? AND status IN (?, ?, ?)
+                WHERE id=? AND status IN (?, ?, ?, ?)
                 """,
                 (
                     JobStatus.FAILED,
                     utc_now(),
                     error_message[:1000],
                     job_id,
+                    JobStatus.QUEUED,
                     JobStatus.STARTING,
                     JobStatus.RUNNING,
                     JobStatus.WAITING_APPROVAL,
@@ -1296,10 +2007,15 @@ class Database:
         cursor = await self.connection.execute(
             """
             SELECT id, codex_turn_id FROM jobs
-            WHERE status IN (?, ?, ?)
+            WHERE status IN (?, ?, ?, ?)
             ORDER BY started_at, rowid LIMIT 1
             """,
-            (JobStatus.STARTING, JobStatus.RUNNING, JobStatus.WAITING_APPROVAL),
+            (
+                JobStatus.QUEUED,
+                JobStatus.STARTING,
+                JobStatus.RUNNING,
+                JobStatus.WAITING_APPROVAL,
+            ),
         )
         row = await cursor.fetchone()
         if row is None:
@@ -1313,12 +2029,13 @@ class Database:
             await connection.execute(
                 """
                 UPDATE jobs SET status=?, finished_at=?
-                WHERE id=? AND status IN (?, ?, ?)
+                WHERE id=? AND status IN (?, ?, ?, ?)
                 """,
                 (
                     JobStatus.INTERRUPTED,
                     utc_now(),
                     job_id,
+                    JobStatus.QUEUED,
                     JobStatus.STARTING,
                     JobStatus.RUNNING,
                     JobStatus.WAITING_APPROVAL,
@@ -1494,8 +2211,13 @@ class Database:
 
     async def active_job_count(self) -> int:
         cursor = await self.connection.execute(
-            "SELECT COUNT(*) AS count FROM jobs WHERE status IN (?, ?, ?)",
-            (JobStatus.STARTING, JobStatus.RUNNING, JobStatus.WAITING_APPROVAL),
+            "SELECT COUNT(*) AS count FROM jobs WHERE status IN (?, ?, ?, ?)",
+            (
+                JobStatus.QUEUED,
+                JobStatus.STARTING,
+                JobStatus.RUNNING,
+                JobStatus.WAITING_APPROVAL,
+            ),
         )
         row = await cursor.fetchone()
         return 0 if row is None else int(row["count"])
@@ -1504,11 +2226,16 @@ class Database:
         cursor = await self.connection.execute(
             """
             SELECT status FROM jobs
-            WHERE status IN (?, ?, ?)
+            WHERE status IN (?, ?, ?, ?)
             ORDER BY started_at, rowid
             LIMIT 1
             """,
-            (JobStatus.STARTING, JobStatus.RUNNING, JobStatus.WAITING_APPROVAL),
+            (
+                JobStatus.QUEUED,
+                JobStatus.STARTING,
+                JobStatus.RUNNING,
+                JobStatus.WAITING_APPROVAL,
+            ),
         )
         row = await cursor.fetchone()
         return None if row is None else JobStatus(str(row["status"]))
@@ -1521,11 +2248,16 @@ class Database:
             JOIN conversations c ON c.id=j.conversation_id
             JOIN projects p ON p.id=c.project_id
             CROSS JOIN app_state s
-            WHERE j.status IN (?, ?, ?)
+            WHERE j.status IN (?, ?, ?, ?)
             ORDER BY j.started_at, j.rowid
             LIMIT 1
             """,
-            (JobStatus.STARTING, JobStatus.RUNNING, JobStatus.WAITING_APPROVAL),
+            (
+                JobStatus.QUEUED,
+                JobStatus.STARTING,
+                JobStatus.RUNNING,
+                JobStatus.WAITING_APPROVAL,
+            ),
         )
         row = await cursor.fetchone()
         return None if row is None else self._project_from_row(row)
@@ -1544,11 +2276,12 @@ class Database:
                 """
                 UPDATE jobs
                 SET status=?, finished_at=?, error_message='runtime_restarted'
-                WHERE status IN (?, ?, ?)
+                WHERE status IN (?, ?, ?, ?)
                 """,
                 (
                     JobStatus.INTERRUPTED,
                     utc_now(),
+                    JobStatus.QUEUED,
                     JobStatus.STARTING,
                     JobStatus.RUNNING,
                     JobStatus.WAITING_APPROVAL,
@@ -1564,10 +2297,11 @@ class Database:
                    WHERE lock_owner IS NOT NULL
                      AND id NOT IN (
                        SELECT conversation_id FROM jobs
-                       WHERE status IN (?, ?, ?)
+                       WHERE status IN (?, ?, ?, ?)
                      )""",
                 (
                     utc_now(),
+                    JobStatus.QUEUED,
                     JobStatus.STARTING,
                     JobStatus.RUNNING,
                     JobStatus.WAITING_APPROVAL,
@@ -1775,6 +2509,25 @@ class Database:
         now = utc_now()
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
         async with self.transaction() as connection:
+            # The first version intentionally has one global execution slot.
+            # Enforce that invariant in the same write transaction that queues
+            # the job, so future connectors cannot bypass the Telegram router's
+            # in-memory lock or race each other between a check and an insert.
+            cursor = await connection.execute(
+                """SELECT COUNT(*) AS count FROM jobs
+                   WHERE status IN (?, ?, ?, ?)""",
+                (
+                    JobStatus.QUEUED,
+                    JobStatus.STARTING,
+                    JobStatus.RUNNING,
+                    JobStatus.WAITING_APPROVAL,
+                ),
+            )
+            active = await cursor.fetchone()
+            if active is None:
+                raise RuntimeError("无法确认当前任务状态")
+            if int(active["count"]):
+                raise RuntimeError("全局已有任务运行，请等待完成后再开始新任务。")
             await connection.execute(
                 """
                 INSERT INTO jobs(
@@ -1945,6 +2698,7 @@ class Database:
 
     @staticmethod
     def _conversation_from_row(row: aiosqlite.Row) -> Conversation:
+        raw_cwd = row["cwd"] if "cwd" in row.keys() else None
         return Conversation(
             id=str(row["id"]),
             project_id=str(row["project_id"]) if row["project_id"] is not None else None,
@@ -1979,5 +2733,33 @@ class Database:
                 str(row["lock_owner"])
                 if "lock_owner" in row.keys() and row["lock_owner"] is not None
                 else None
+            ),
+            cwd=Path(str(raw_cwd)) if raw_cwd is not None else None,
+        )
+
+    @staticmethod
+    def _global_session_from_row(row: aiosqlite.Row) -> GlobalSession:
+        return GlobalSession(
+            thread_id=str(row["codex_thread_id"]),
+            title=str(row["title"]),
+            cwd=Path(str(row["cwd"])),
+            source=str(row["source"]),
+            codex_updated_at=int(row["codex_updated_at"]),
+            is_active=bool(row["is_active"]),
+            project_id=str(row["project_id"]) if row["project_id"] is not None else None,
+            project_name=(
+                str(row["project_name"]) if row["project_name"] is not None else None
+            ),
+            project_enabled=bool(row["project_enabled"]),
+            conversation_id=(
+                str(row["conversation_id"])
+                if row["conversation_id"] is not None
+                else None
+            ),
+            is_current_project=bool(row["is_current_project"]),
+            is_current_conversation=bool(row["is_current_conversation"]),
+            path_available=bool(row["path_available"]),
+            archived_at=(
+                str(row["archived_at"]) if row["archived_at"] is not None else None
             ),
         )

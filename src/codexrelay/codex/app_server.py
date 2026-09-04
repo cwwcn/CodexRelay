@@ -36,7 +36,12 @@ from openai_codex.generated.v2_all import (
 )
 from openai_codex.models import Notification
 
-from codexrelay.codex.base import DesktopThread, ProgressCallback, TurnResult
+from codexrelay.codex.base import (
+    DesktopThread,
+    ProgressCallback,
+    TurnResult,
+    select_project_threads,
+)
 from codexrelay.codex.model_catalog import CodexModelCatalog, CodexModelOption
 from codexrelay.models import ProjectApprovalMode
 
@@ -316,10 +321,16 @@ class AppServerBackend:
         await handle.interrupt()
 
     async def list_project_threads(self, project: Path) -> list[DesktopThread]:
-        """Discover saved Codex threads whose cwd is exactly this project."""
+        """Discover saved Codex threads belonging to this project tree."""
         resolved_project = project.expanduser().resolve(strict=True)
         if not resolved_project.is_dir():
             raise ValueError("Codex project path is not a directory")
+        return select_project_threads(
+            await self.list_all_threads(), resolved_project, project.name
+        )
+
+    async def list_all_threads(self) -> list[DesktopThread]:
+        """Discover every non-archived Codex thread visible to the local runtime."""
         discovered: list[DesktopThread] = []
         seen_thread_ids: set[str] = set()
         cursor: str | None = None
@@ -340,16 +351,11 @@ class AppServerBackend:
                 if not title:
                     title = "未命名会话"
                 raw_cwd = getattr(thread.cwd, "root", thread.cwd)
-                cwd_matches = Path(str(raw_cwd)).expanduser().resolve() == resolved_project
-                if not cwd_matches and project.name.casefold() not in title.casefold():
-                    continue
                 raw_source = getattr(thread.source, "root", thread.source)
                 source_kind = getattr(raw_source, "value", str(raw_source))
                 source = "desktop" if source_kind in {"cli", "vscode"} else (
                     "telegram" if source_kind == "appServer" else "other"
                 )
-                if source == "desktop" and not cwd_matches:
-                    source = "desktop_migrated"
                 discovered.append(
                     DesktopThread(
                         thread_id=thread.id,
@@ -358,7 +364,7 @@ class AppServerBackend:
                         updated_at=thread.updated_at,
                         is_active=getattr(thread.status, "type", "") == "active",
                         source=source,
-                        cwd_matches_project=cwd_matches,
+                        cwd_matches_project=False,
                     )
                 )
             next_cursor = response.next_cursor
