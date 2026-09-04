@@ -320,43 +320,52 @@ class AppServerBackend:
         resolved_project = project.expanduser().resolve(strict=True)
         if not resolved_project.is_dir():
             raise ValueError("Codex project path is not a directory")
-        response = await self._require_client().thread_list(
-            archived=False,
-            limit=200,
-            sort_key=ThreadSortKey.updated_at,
-            sort_direction=SortDirection.desc,
-        )
         discovered: list[DesktopThread] = []
         seen_thread_ids: set[str] = set()
-        for thread in response.data:
-            if thread.id in seen_thread_ids:
-                continue
-            seen_thread_ids.add(thread.id)
-            title = (thread.name or "").strip() or (thread.preview or "").strip()
-            if not title:
-                title = "未命名会话"
-            raw_cwd = getattr(thread.cwd, "root", thread.cwd)
-            cwd_matches = Path(str(raw_cwd)).expanduser().resolve() == resolved_project
-            if not cwd_matches and project.name.casefold() not in title.casefold():
-                continue
-            raw_source = getattr(thread.source, "root", thread.source)
-            source_kind = getattr(raw_source, "value", str(raw_source))
-            source = "desktop" if source_kind in {"cli", "vscode"} else (
-                "telegram" if source_kind == "appServer" else "other"
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        while True:
+            response = await self._require_client().thread_list(
+                archived=False,
+                cursor=cursor,
+                limit=200,
+                sort_key=ThreadSortKey.updated_at,
+                sort_direction=SortDirection.desc,
             )
-            if source == "desktop" and not cwd_matches:
-                source = "desktop_migrated"
-            discovered.append(
-                DesktopThread(
-                    thread_id=thread.id,
-                    title=title[:120],
-                    cwd=Path(str(raw_cwd)),
-                    updated_at=thread.updated_at,
-                    is_active=getattr(thread.status, "type", "") == "active",
-                    source=source,
-                    cwd_matches_project=cwd_matches,
+            for thread in response.data:
+                if thread.id in seen_thread_ids:
+                    continue
+                seen_thread_ids.add(thread.id)
+                title = (thread.name or "").strip() or (thread.preview or "").strip()
+                if not title:
+                    title = "未命名会话"
+                raw_cwd = getattr(thread.cwd, "root", thread.cwd)
+                cwd_matches = Path(str(raw_cwd)).expanduser().resolve() == resolved_project
+                if not cwd_matches and project.name.casefold() not in title.casefold():
+                    continue
+                raw_source = getattr(thread.source, "root", thread.source)
+                source_kind = getattr(raw_source, "value", str(raw_source))
+                source = "desktop" if source_kind in {"cli", "vscode"} else (
+                    "telegram" if source_kind == "appServer" else "other"
                 )
-            )
+                if source == "desktop" and not cwd_matches:
+                    source = "desktop_migrated"
+                discovered.append(
+                    DesktopThread(
+                        thread_id=thread.id,
+                        title=title[:120],
+                        cwd=Path(str(raw_cwd)),
+                        updated_at=thread.updated_at,
+                        is_active=getattr(thread.status, "type", "") == "active",
+                        source=source,
+                        cwd_matches_project=cwd_matches,
+                    )
+                )
+            next_cursor = response.next_cursor
+            if not next_cursor or next_cursor in seen_cursors:
+                break
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
         return discovered
 
     def _require_client(self) -> AsyncCodex:

@@ -1031,6 +1031,73 @@ class Database:
         )
         return [self._conversation_from_row(row) for row in await cursor.fetchall()]
 
+    async def archive_missing_codex_conversations(
+        self, project_id: str, present_thread_ids: set[str]
+    ) -> int:
+        """Hide Codex conversations no longer returned by Codex thread/list.
+
+        This reconciliation is only called after a successful discovery request,
+        so a transient App Server failure cannot erase the local view.  Archived
+        rows remain in SQLite for context recovery but no longer appear in
+        Telegram's selectable session list.
+        """
+        now = utc_now()
+        async with self.transaction() as connection:
+            query = (
+                "UPDATE conversations SET archived_at=?, lock_owner=NULL "
+                "WHERE project_id=? AND archived_at IS NULL "
+                "AND codex_thread_id IS NOT NULL "
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM jobs WHERE jobs.conversation_id=conversations.id "
+                "AND jobs.status IN (?, ?, ?)"
+                ")"
+            )
+            parameters = [
+                now,
+                project_id,
+                JobStatus.STARTING,
+                JobStatus.RUNNING,
+                JobStatus.WAITING_APPROVAL,
+            ]
+            if present_thread_ids:
+                placeholders = ",".join("?" for _ in present_thread_ids)
+                query += f" AND codex_thread_id NOT IN ({placeholders})"
+                parameters.extend(sorted(present_thread_ids))
+            result = await connection.execute(query, parameters)
+            await connection.execute(
+                """UPDATE app_state SET current_conversation_id=NULL
+                   WHERE singleton=1 AND current_conversation_id IN (
+                       SELECT id FROM conversations
+                       WHERE project_id=? AND archived_at=?
+                   )""",
+                (project_id, now),
+            )
+            return result.rowcount
+
+    async def select_first_available_conversation(self, project_id: str) -> Conversation | None:
+        """Select the first real Codex conversation when the current one vanished."""
+        current = await self.current_conversation(project_id)
+        if current is not None:
+            return current
+        cursor = await self.connection.execute(
+            """SELECT id FROM conversations
+               WHERE project_id=? AND archived_at IS NULL
+                 AND codex_thread_id IS NOT NULL
+               ORDER BY is_pinned DESC, last_used_at DESC, created_at DESC
+               LIMIT 1""",
+            (project_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        conversation_id = str(row["id"])
+        async with self.transaction() as connection:
+            await connection.execute(
+                "UPDATE app_state SET current_conversation_id=? WHERE singleton=1",
+                (conversation_id,),
+            )
+        return await self.conversation(conversation_id)
+
     async def register_external_conversation(
         self,
         project_id: str,
@@ -1051,23 +1118,40 @@ class Database:
             )
             row = await cursor.fetchone()
             if row is None:
-                conversation_id = str(uuid.uuid4())
-                await connection.execute(
-                    """INSERT INTO conversations(
-                           id, project_id, codex_thread_id, title, status, source,
-                           scope, last_used_at, created_at, updated_at
-                       ) VALUES (?, ?, ?, ?, 'active', ?, 'project', ?, ?, ?)""",
-                    (
-                        conversation_id,
-                        project_id,
-                        codex_thread_id,
-                        clean_title,
-                        source,
-                        now,
-                        now,
-                        now,
-                    ),
+                archived_cursor = await connection.execute(
+                    """SELECT id FROM conversations
+                       WHERE project_id=? AND codex_thread_id=?
+                       LIMIT 1""",
+                    (project_id, codex_thread_id),
                 )
+                archived_row = await archived_cursor.fetchone()
+                if archived_row is not None:
+                    conversation_id = str(archived_row["id"])
+                    await connection.execute(
+                        """UPDATE conversations
+                           SET title=?, source=?, archived_at=NULL, status='active',
+                               updated_at=?
+                           WHERE id=?""",
+                        (clean_title, source, now, conversation_id),
+                    )
+                else:
+                    conversation_id = str(uuid.uuid4())
+                    await connection.execute(
+                        """INSERT INTO conversations(
+                               id, project_id, codex_thread_id, title, status, source,
+                               scope, last_used_at, created_at, updated_at
+                           ) VALUES (?, ?, ?, ?, 'active', ?, 'project', ?, ?, ?)""",
+                        (
+                            conversation_id,
+                            project_id,
+                            codex_thread_id,
+                            clean_title,
+                            source,
+                            now,
+                            now,
+                            now,
+                        ),
+                    )
             else:
                 conversation_id = str(row["id"])
                 await connection.execute(

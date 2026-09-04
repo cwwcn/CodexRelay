@@ -125,6 +125,8 @@ Full command reference:
 
 ```text
 /help
+/pair 123456
+ Pair a Telegram account for first-time setup
 /projects
 /use 1
 /use CodexRelay
@@ -142,16 +144,16 @@ Full command reference:
 /stop
  Stop the current task
 /release
- Release the current conversation
+ Clear an abnormal stale state (usually unnecessary)
 /takeover
- Take over the current conversation
+ Show hand-off information (compatibility command; no manual takeover)
 ```
 
-`/help` groups commands into daily actions, task control, configuration and security, and first-time setup. `/security` shows the current project's approval mode. Safe mode asks for each elevated operation in Telegram. “Auto-allow within this project” requires a second confirmation and only accepts operations that remain inside the current project directory; network and out-of-project requests still cannot be silently approved. It is disabled again after switching projects or pairing a different Telegram account. This setting is stored in CodexRelay's local database and does not modify `~/.codex/config.toml`.
+`/help` groups commands into daily actions, task control, configuration and security, and first-time setup. Before pairing, only `/pair <six-digit code>` is accepted (the BotFather deep-link form `/start pair_<six-digit code>` is also supported); a paired account that sends `/pair` again receives a status message instead of accidentally submitting a Codex task. `/security` shows and changes the current project's approval mode; `/approval` is accepted as a compatibility alias. `/reasoning` changes the reasoning effort; `/effort` is accepted as a compatibility alias. Safe mode asks for each elevated operation in Telegram. “Auto-allow within this project” requires a second confirmation and only accepts operations that remain inside the current project directory; network and out-of-project requests still cannot be silently approved. It is disabled again after switching projects or pairing a different Telegram account. This setting is stored in CodexRelay's local database and does not modify `~/.codex/config.toml`.
 
 Project switching is allowed only after the current task finishes. To switch immediately, send `/stop` first, then `/use`. Switching projects does not clear the previous project's conversation.
 
-A project can contain multiple conversations. Use `/sessions` to list both Telegram-created conversations and conversations created on the computer, `/session <number>` to select one, and `/new` to create one. If a project directory was moved, a matching computer-created thread may be shown as `电脑上创建（路径已迁移）`; selecting it resumes the original context using the current project path. The source label describes where the conversation was created; the occupancy label separately describes which side currently holds it. Selecting a conversation claims it for Telegram; use `/release` when you want to let the computer side or another connector use it again. Conversation context is isolated, and model/reasoning settings follow each conversation. `/takeover` can claim an idle conversation explicitly. After an abnormal exit, stale leases with no active task are cleared automatically.
+A project can contain multiple conversations. Use `/sessions` to list both Telegram-created conversations and conversations created on the computer, `/session <number>` to select one, and `/new` to create one. Startup, periodic background sync, and each `/sessions` request reconcile the list. When a conversation is deleted or archived in Codex, the next successful sync hides it from Telegram. If the currently selected conversation becomes invalid, CodexRelay selects the first still-valid conversation; if none remain, it returns to an unselected state. Local history is retained for audit and possible recovery rather than permanently deleted. If it is later restored in Codex, Telegram restores the same conversation by thread ID without creating a duplicate. If a project directory was moved, a matching computer-created thread is shown with a clear unavailable-path note; selecting it resumes the original context using the current project path. The source label describes where the conversation was created, while the occupancy label is only a short-lived indicator for the currently running turn. Telegram releases that indicator automatically when a task finishes, so returning to the computer requires no manual hand-off. Conversation context is isolated, and model/reasoning settings follow each conversation. `/release` remains available to clear an abnormal stale state; `/takeover` is retained as a compatibility command and does not create a permanent lock. Unknown slash commands are rejected explicitly instead of being sent as Codex tasks.
 
 ## Models and reasoning effort
 

@@ -340,7 +340,100 @@ async def test_sessions_syncs_desktop_threads_idempotently_and_selects_one(
         current = await database.current_conversation(project.id)
         assert current is not None
         assert current.codex_thread_id == "desktop-thread-1"
-        assert current.lock_owner == "telegram"
+        assert current.lock_owner is None
+
+
+@pytest.mark.asyncio
+async def test_sessions_hides_desktop_conversation_deleted_on_computer(
+    tmp_path: Path,
+) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    async with Database(tmp_path / "state.db") as database:
+        project = await database.add_project(project_path, "Relay")
+        await authorize(database)
+        backend = DesktopThreadBackend(
+            [
+                DesktopThread(
+                    thread_id="desktop-thread-deleted",
+                    title="电脑上创建的会话",
+                    cwd=project_path,
+                    updated_at=1,
+                )
+            ]
+        )
+        router = TelegramRouter(
+            database=database,
+            client=cast(TelegramClient, UnusedTelegramClient()),
+            relay=cast(RelayService, UnusedRelay()),
+            pairing=PairingService(database),
+            project_service=ProjectService(database),
+            temporary_directory=tmp_path / "temp",
+            codex_backend=cast(Any, backend),
+        )
+
+        await router.handle("event-sessions-present", message("/sessions"))
+        backend.threads.clear()
+        await router.handle("event-sessions-deleted", message("/sessions"))
+
+        assert await database.list_conversations(project.id) == []
+        current = await database.current_conversation(project.id)
+        assert current is None
+        pending = await database.pending_outbound_messages(
+            connector_type="telegram", account_id="main-bot"
+        )
+        assert "当前项目还没有会话" in pending[-1].payload_json
+
+
+@pytest.mark.asyncio
+async def test_sessions_hides_any_codex_conversation_deleted_externally(
+    tmp_path: Path,
+) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    async with Database(tmp_path / "state.db") as database:
+        project = await database.add_project(project_path, "Relay")
+        await authorize(database)
+        conversation_id = await database.create_conversation(
+            project.id,
+            "Telegram 创建的会话",
+            source="telegram",
+        )
+        await database.connection.execute(
+            "UPDATE conversations SET codex_thread_id=? WHERE id=?",
+            ("telegram-thread-deleted", conversation_id),
+        )
+        await database.connection.commit()
+        backend = DesktopThreadBackend([])
+        router = TelegramRouter(
+            database=database,
+            client=cast(TelegramClient, UnusedTelegramClient()),
+            relay=cast(RelayService, UnusedRelay()),
+            pairing=PairingService(database),
+            project_service=ProjectService(database),
+            temporary_directory=tmp_path / "temp",
+            codex_backend=cast(Any, backend),
+        )
+
+        await router.handle("event-sessions-deleted", message("/sessions"))
+
+        assert await database.list_conversations(project.id) == []
+        archived = await database.conversation(conversation_id)
+        assert archived is not None and archived.archived_at is not None
+
+        backend.threads.append(
+            DesktopThread(
+                thread_id="telegram-thread-deleted",
+                title="恢复的会话",
+                cwd=project_path,
+                updated_at=2,
+            )
+        )
+        await router.handle("event-sessions-restored", message("/sessions"))
+        restored = await database.list_conversations(project.id)
+        assert len(restored) == 1
+        assert restored[0].id == conversation_id
+        assert restored[0].archived_at is None
 
 
 def test_task_error_message_explains_desktop_writer_conflict() -> None:
@@ -403,7 +496,7 @@ async def test_router_selects_model_and_reasoning_for_current_project_conversati
 
         await router.handle("event-models", message("/models"))
         await router.handle("event-model", message("/model 2"))
-        await router.handle("event-reasoning", message("/reasoning xhigh"))
+        await router.handle("event-reasoning", message("/effort xhigh"))
         await router.handle("event-status", message("/status"))
 
         conversation = await database.active_conversation(project.id)
@@ -589,6 +682,57 @@ async def test_unpaired_user_can_pair_with_one_time_code(tmp_path: Path) -> None
         assert await database.is_authorized_identity(
             connector_type="telegram", account_id="main-bot", external_user_id="123"
         )
+
+
+@pytest.mark.asyncio
+async def test_router_normalizes_commands_and_rejects_unknown_slash_commands(
+    tmp_path: Path,
+) -> None:
+    async with Database(tmp_path / "state.db") as database:
+        await authorize(database)
+        router = TelegramRouter(
+            database=database,
+            client=cast(TelegramClient, UnusedTelegramClient()),
+            relay=cast(RelayService, UnusedRelay()),
+            pairing=PairingService(database),
+            project_service=ProjectService(database),
+            temporary_directory=tmp_path / "temp",
+        )
+
+        await router.handle("event-help", message("  /HELP@codexrelay_bot   "))
+        await router.handle("event-unknown", message("/does-not-exist   argument"))
+
+        pending = await database.pending_outbound_messages(
+            connector_type="telegram", account_id="main-bot"
+        )
+        assert len(pending) == 2
+        assert "/projects" in pending[0].payload_json
+        assert "未识别的命令：/does-not-exist" in pending[1].payload_json
+
+
+@pytest.mark.asyncio
+async def test_already_paired_pair_command_is_not_sent_as_a_codex_task(
+    tmp_path: Path,
+) -> None:
+    async with Database(tmp_path / "state.db") as database:
+        await authorize(database)
+        relay = cast(Any, UnusedRelay())
+        router = TelegramRouter(
+            database=database,
+            client=cast(TelegramClient, UnusedTelegramClient()),
+            relay=relay,
+            pairing=PairingService(database),
+            project_service=ProjectService(database),
+            temporary_directory=tmp_path / "temp",
+        )
+
+        await router.handle("event-pair-again", message("/pair 123456"))
+
+        pending = await database.pending_outbound_messages(
+            connector_type="telegram", account_id="main-bot"
+        )
+        assert len(pending) == 1
+        assert "已经完成配对" in pending[0].payload_json
 
 
 @pytest.mark.asyncio

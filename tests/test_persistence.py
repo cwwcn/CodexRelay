@@ -157,6 +157,38 @@ async def test_restart_interrupts_uncertain_active_job_without_losing_context(
 
 
 @pytest.mark.asyncio
+async def test_reconciliation_never_archives_a_conversation_with_an_active_job(
+    tmp_path: Path,
+) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    async with Database(tmp_path / "state.db") as database:
+        project = await database.add_project(project_path)
+        conversation = await database.register_external_conversation(
+            project.id,
+            codex_thread_id="active-thread",
+            title="Active session",
+        )
+        await database.select_conversation(conversation.id, project.id)
+        job_id, _message = await database.create_queued_job_with_input(
+            conversation_id=conversation.id,
+            text="keep the session visible",
+        )
+        await database.mark_job_starting(job_id)
+
+        assert await database.archive_missing_codex_conversations(project.id, set()) == 0
+        still_current = await database.current_conversation(project.id)
+        assert still_current is not None and still_current.id == conversation.id
+        assert still_current.archived_at is None
+
+        await database.mark_job_interrupted(job_id)
+        assert await database.archive_missing_codex_conversations(project.id, set()) == 1
+        archived = await database.conversation(conversation.id)
+        assert archived is not None and archived.archived_at is not None
+        assert await database.current_conversation(project.id) is None
+
+
+@pytest.mark.asyncio
 async def test_housekeeping_trims_transport_payloads_but_keeps_canonical_context(
     tmp_path: Path,
 ) -> None:

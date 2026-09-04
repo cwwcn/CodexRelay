@@ -103,11 +103,10 @@ class RelayService:
             await self.database.fail_job(job_id, "conversation_disappeared")
             raise RuntimeError("conversation disappeared before Codex execution")
         owner = delivery.connector_type if delivery is not None else "local"
-        # A conversation selected from Telegram may already have a persistent
-        # lease. Keep that lease after the turn so `/release` remains the
-        # explicit hand-off point to the desktop client. Newly acquired leases
-        # are transient and are released when this turn finishes.
-        persistent_lock = execution_conversation.lock_owner == owner
+        # Conversation leases are deliberately turn-scoped. Telegram should
+        # hand the session back to the desktop naturally after each response;
+        # a prior `/use`, `/new`, or `/session` must never leave a permanent
+        # Telegram ownership marker behind.
         try:
             await self.database.acquire_conversation_lock(conversation.id, owner)
         except BaseException as error:
@@ -180,8 +179,7 @@ class RelayService:
             await self.database.fail_job(job_id, type(error).__name__)
             raise
         finally:
-            if not persistent_lock:
-                await self.database.release_conversation_lock(conversation.id, owner)
+            await self.database.release_conversation_lock(conversation.id, owner)
         return RelayResult(
             job_id=job_id,
             conversation_id=conversation.id,

@@ -174,7 +174,7 @@ async def test_relay_persists_turn_before_result_and_queues_delivery(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_relay_keeps_preselected_telegram_lease_until_release(tmp_path: Path) -> None:
+async def test_relay_releases_preselected_telegram_lease_after_turn(tmp_path: Path) -> None:
     project_path = tmp_path / "project"
     project_path.mkdir()
     async with Database(tmp_path / "state.db") as database:
@@ -197,7 +197,7 @@ async def test_relay_keeps_preselected_telegram_lease_until_release(tmp_path: Pa
         )
 
         current = await database.current_conversation(project.id)
-        assert current is not None and current.lock_owner == "telegram"
+        assert current is not None and current.lock_owner is None
 
 
 @pytest.mark.asyncio

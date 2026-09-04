@@ -183,6 +183,7 @@ Telegram 文本超过单条消息限制时由 API 层分段发送。分段器优
 
 ```text
 /help                 查看帮助
+/pair <六位配对码>     首次配对 Telegram 账号
 /projects             查看已授权项目
 /use <编号或名称>     切换当前项目
 /new                  为当前项目创建新对话
@@ -190,17 +191,17 @@ Telegram 文本超过单条消息限制时由 API 层分段发送。分段器优
 /session <编号>       切换当前项目会话
 /models               查看可用模型
 /model <编号或名称>   修改当前会话模型
-/reasoning <强度>     修改当前会话推理强度
+/reasoning <强度>     修改当前会话推理强度（别名：/effort）
 /status               查看连接、项目和任务状态
-/security             查看或修改当前项目审批模式
+/security             查看或修改当前项目审批模式（别名：/approval）
 /stop                 中断当前任务
-/release              释放当前会话占用
-/takeover             接管当前会话
+/release              清理异常遗留状态（通常无需使用）
+/takeover             查看会话接力说明（兼容命令，无需手动接管）
 ```
 
-命令解析在 Telegram Router 中完成，但真正的项目切换、会话创建和任务状态修改仍通过 Core/Database 服务执行。
+命令解析在 Telegram Router 中完成，但真正的项目切换、会话创建和任务状态修改仍通过 Core/Database 服务执行。解析会统一处理大小写、连续空白和 Telegram 可能附加的 `@bot_username`；未注册的斜杠命令会明确提示，不会误当成普通 Codex 任务。命令注册表同时驱动原生菜单和 `/help`，兼容别名只在 Router 中接受，不额外占用菜单位置。
 
-0.2.0 起，一个项目允许多个 Conversation。`app_state.current_conversation_id` 记录当前选中的会话；切换项目时清空该指针，进入新项目后再选择或创建会话。会话的 `source` 表示它最初在哪一端创建（Telegram 创建、电脑上创建或其他连接器创建），`lock_owner` 则独立表示当前由哪一端占用，不能混为同一个概念。`/sessions` 在请求时通过 Codex App Server 的 `thread/list` 同步电脑端会话：当前 `cwd` 精确匹配的 thread 直接列出；当项目目录迁移后，标题明确匹配当前项目名但 cwd 不同的桌面 thread 以“路径已迁移”标记列出，供用户显式选择并用当前路径恢复。同步按 Codex thread ID 幂等注册，不复制上下文，也不按模糊项目名放开全部会话。会话拥有独立的 Codex thread、模型配置和上下文，不会因为出现在“最近”视图中而改变项目归属。使用 `/session` 选择会话后，Telegram 会持有该会话租约；`/release` 释放当前会话，让电脑端或其他连接器继续使用；`/takeover` 用于显式接管空闲会话。启动恢复阶段会清理没有活动任务支撑的遗留租约，避免异常退出造成永久占用。
+0.2.0 起，一个项目允许多个 Conversation。`app_state.current_conversation_id` 记录当前选中的会话；切换项目时清空该指针，进入新项目后再选择或创建会话。会话的 `source` 表示它最初在哪一端创建（Telegram 创建、电脑端创建或其他连接器创建），`lock_owner` 则独立表示当前正在运行的这一轮任务由哪一端发起，不能混为同一个概念。`/sessions` 在请求时通过 Codex App Server 的 `thread/list` 同步电脑端会话：当前 `cwd` 精确匹配的 thread 直接列出；当项目目录迁移后，标题明确匹配当前项目名但 cwd 不同的桌面 thread 以路径不可用提示列出，供用户显式选择并用当前路径恢复。同步按 Codex thread ID 幂等注册，不复制上下文，也不按模糊项目名放开全部会话；应用启动、定期后台同步和 `/sessions` 请求都会执行校准，每次成功同步还会把 Codex 已不再返回的全部绑定会话（不区分创建来源）归档并从可选列表隐藏，保留本地历史，不做永久删除；如果当前选中的会话失效，则自动取消选择并切换到仍有效的第一条会话，没有有效会话时保持未选择；如果会话之后在 Codex 中恢复，则按原 thread ID 解除归档，避免重复条目；临时同步失败则不触发清理。会话拥有独立的 Codex thread、模型配置和上下文，不会因为出现在“最近”视图中而改变项目归属。使用 `/session` 只改变当前选择，不创建永久占用；Telegram 任务运行期间短暂持有会话租约，任务完成、失败或停止后自动释放，让用户回到电脑端即可继续。`/release` 用于清理异常遗留状态，`/takeover` 为兼容保留，不创建永久锁定。启动恢复阶段会清理没有活动任务支撑的遗留租约，避免异常退出造成永久占用。
 
 应用连接 Telegram 时还会通过 `setMyCommands` 注册这组命令的中文说明，并限定在私聊范围内。这样用户在 Telegram 输入 `/` 时可以看到原生命令提示；命令菜单属于 Telegram Connector 的体验能力，不会成为其他连接器必须实现的共性接口。命令名称、菜单说明和 `/help` 文本由 Telegram Connector 内部的单一注册表生成，新增 Telegram 命令时不需要同步维护多份列表。
 

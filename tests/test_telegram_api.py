@@ -14,6 +14,7 @@ from codexrelay.connectors.telegram.commands import (
     TELEGRAM_PRIVATE_COMMAND_SCOPE,
     bot_api_commands,
     help_text,
+    recognized_command_names,
 )
 
 
@@ -195,6 +196,9 @@ def test_telegram_command_registry_drives_help_text() -> None:
         "takeover",
     ]
     assert "/use 切换当前项目：/use <编号或名称>" in help_text()
+    assert "别名：/approval" in help_text()
+    assert "别名：/effort" in help_text()
+    assert recognized_command_names() >= {"security", "approval", "reasoning", "effort"}
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,14 @@ from dataclasses import dataclass
 
 TELEGRAM_PRIVATE_COMMAND_SCOPE: Mapping[str, str] = {"type": "all_private_chats"}
 
+# Aliases stay Telegram-connector-specific.  They are accepted by the router
+# for backwards compatibility, but are intentionally not duplicated in the
+# Telegram command menu so the native picker remains compact.
+TELEGRAM_COMMAND_ALIASES: Mapping[str, str] = {
+    "approval": "security",
+    "effort": "reasoning",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class TelegramCommand:
@@ -35,18 +43,37 @@ TELEGRAM_COMMANDS: tuple[TelegramCommand, ...] = (
     TelegramCommand("session", "切换当前项目会话", "切换会话：/session <编号>"),
     TelegramCommand("models", "查看可用模型", "查看可用模型"),
     TelegramCommand("model", "选择当前会话模型", "选择模型：/model <编号或名称>"),
-    TelegramCommand("reasoning", "设置推理强度", "设置推理强度：/reasoning <强度>"),
+    TelegramCommand(
+        "reasoning",
+        "设置推理强度",
+        "设置推理强度：/reasoning <强度>（别名：/effort）",
+    ),
     TelegramCommand("status", "查看当前状态", "查看当前状态"),
-    TelegramCommand("security", "设置项目审批模式", "设置项目审批模式"),
+    TelegramCommand(
+        "security",
+        "设置项目审批模式",
+        "设置项目审批模式（别名：/approval）",
+    ),
     TelegramCommand("stop", "停止当前任务", "停止当前任务"),
-    TelegramCommand("release", "释放当前会话", "释放当前会话占用"),
-    TelegramCommand("takeover", "接管当前会话", "接管当前会话"),
+    TelegramCommand("release", "清理异常状态", "清理异常遗留状态（通常无需使用）"),
+    TelegramCommand(
+        "takeover",
+        "查看会话接力说明",
+        "查看会话接力说明（兼容命令，无需手动接管）",
+    ),
 )
 
 
 def bot_api_commands() -> tuple[dict[str, str], ...]:
     """Return fresh payloads suitable for Telegram's setMyCommands API."""
     return tuple(command.bot_api_payload() for command in TELEGRAM_COMMANDS)
+
+
+def recognized_command_names() -> frozenset[str]:
+    """Return canonical commands plus compatibility aliases accepted by Router."""
+    return frozenset(command.name for command in TELEGRAM_COMMANDS) | frozenset(
+        TELEGRAM_COMMAND_ALIASES
+    )
 
 
 def help_text() -> str:

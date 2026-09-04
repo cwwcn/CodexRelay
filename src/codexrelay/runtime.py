@@ -157,16 +157,19 @@ class CodexRelayRuntime:
             raise RuntimeError("runtime components are missing")
         poller_task = asyncio.create_task(self.poller.run(self.router.handle, stop))
         outbox_task = asyncio.create_task(self._run_outbox(stop))
+        session_sync_task = asyncio.create_task(self._run_session_sync(stop))
         try:
             await stop.wait()
             if self.relay is not None:
                 await self.relay.interrupt_active()
-            await asyncio.gather(poller_task, outbox_task)
+            await asyncio.gather(poller_task, outbox_task, session_sync_task)
         finally:
-            for task in (poller_task, outbox_task):
+            for task in (poller_task, outbox_task, session_sync_task):
                 if not task.done():
                     task.cancel()
-            await asyncio.gather(poller_task, outbox_task, return_exceptions=True)
+            await asyncio.gather(
+                poller_task, outbox_task, session_sync_task, return_exceptions=True
+            )
             await self.stop()
 
     async def stop(self) -> None:
@@ -208,3 +211,45 @@ class CodexRelayRuntime:
                 await asyncio.wait_for(stop.wait(), timeout=0.75)
             except TimeoutError:
                 pass
+
+    async def _run_session_sync(self, stop: asyncio.Event) -> None:
+        """Periodically reconcile Codex threads without disturbing Telegram polling."""
+        if self.database is not None and self.backend is not None:
+            await self._sync_registered_projects(self.database, self.backend)
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=60)
+            except TimeoutError:
+                if self.database is not None and self.backend is not None:
+                    await self._sync_registered_projects(self.database, self.backend)
+
+    @staticmethod
+    async def _sync_registered_projects(
+        database: Database, backend: AppServerBackend
+    ) -> None:
+        if await database.active_job_count():
+            return
+        current_project = await database.current_project()
+        for project in await database.list_projects():
+            try:
+                threads = await backend.list_project_threads(project.path)
+                await database.archive_missing_codex_conversations(
+                    project.id,
+                    {thread.thread_id for thread in threads},
+                )
+                for thread in threads:
+                    await database.register_external_conversation(
+                        project.id,
+                        codex_thread_id=thread.thread_id,
+                        title=thread.title,
+                        source=thread.source,
+                    )
+            except Exception as error:
+                # A failed sync must never hide the last known local session.
+                LOGGER.warning(
+                    "could not reconcile Codex conversations for %s: %s",
+                    project.path,
+                    error,
+                )
+        if current_project is not None:
+            await database.select_first_available_conversation(current_project.id)

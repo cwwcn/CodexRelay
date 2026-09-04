@@ -17,7 +17,11 @@ from codexrelay.codex.model_catalog import (
 )
 from codexrelay.connectors.base import IncomingMessage
 from codexrelay.connectors.telegram.api import TelegramClient
-from codexrelay.connectors.telegram.commands import help_text
+from codexrelay.connectors.telegram.commands import (
+    TELEGRAM_COMMAND_ALIASES,
+    help_text,
+    recognized_command_names,
+)
 from codexrelay.connectors.telegram.progress import TelegramProgress
 from codexrelay.core import DeliveryTarget, RelayService
 from codexrelay.database import Database
@@ -110,9 +114,23 @@ class TelegramRouter:
             await self._reply(message, "配对成功。发送 /projects 查看可用项目。")
             return
 
-        command, _, argument = message.text.strip().partition(" ")
+        command, argument = self._parse_command(message.text)
+        if command.startswith("/") and command.removeprefix("/") not in recognized_command_names():
+            await self._reply(
+                message,
+                f"未识别的命令：{command}\n发送 /help 查看可用命令；"
+                "如需把它作为任务，请去掉开头的 /。",
+            )
+            return
         if command == "/help" or command == "/start":
             await self._reply(message, help_text())
+            return
+        if command == "/pair":
+            await self._reply(
+                message,
+                "当前 Telegram 账号已经完成配对。"
+                "如需更换账号，请在 Mac 端重新生成一次性配对码。",
+            )
             return
         if command == "/projects":
             projects = await self.project_service.list_projects()
@@ -166,8 +184,7 @@ class TelegramRouter:
             if project is None:
                 await self._reply(message, "当前没有可用项目。")
                 return
-            created = await self.database.start_new_conversation(project.id, project.name)
-            await self.database.acquire_conversation_lock(created.id, "telegram")
+            await self.database.start_new_conversation(project.id, project.name)
             await self._reply(message, f"已为 {project.name} 新建Codex对话。")
             return
         if command == "/sessions":
@@ -176,9 +193,13 @@ class TelegramRouter:
                 await self._reply(message, "当前没有可用项目。")
                 return
             discovery_note = ""
-            if self.codex_backend is not None:
+            if self.codex_backend is not None and not await self.database.active_job_count():
                 try:
                     desktop_threads = await self.codex_backend.list_project_threads(project.path)
+                    await self.database.archive_missing_codex_conversations(
+                        project.id,
+                        {thread.thread_id for thread in desktop_threads},
+                    )
                     for thread in desktop_threads:
                         await self.database.register_external_conversation(
                             project.id,
@@ -186,6 +207,7 @@ class TelegramRouter:
                             title=thread.title,
                             source=thread.source,
                         )
+                    await self.database.select_first_available_conversation(project.id)
                 except Exception:
                     # Discovery is best-effort; a temporary SDK/store failure
                     # must not hide persisted Telegram conversations.
@@ -207,8 +229,8 @@ class TelegramRouter:
                 marker = "●" if current is not None and session.id == current.id else "○"
                 source_label = {
                     "telegram": "Telegram",
-                    "desktop": "电脑端会话（使用前需交接）",
-                    "desktop_migrated": "电脑端相关会话（使用前需交接）",
+                    "desktop": "电脑端会话",
+                    "desktop_migrated": "电脑端相关会话",
                     "other": "其他连接器创建",
                 }.get(session.source, "未知来源")
                 current_label = " · 当前" if marker == "●" else ""
@@ -225,7 +247,7 @@ class TelegramRouter:
                 message,
                 f"当前项目会话（{len(sessions)}）：\n" + "\n".join(lines)
                 + "\n使用 /session <会话编号> 切换。"
-                + "\n电脑端会话需先关闭电脑端 Codex；也可使用 /new 创建 Telegram 会话。"
+                + "\n电脑端会话可直接继续；也可使用 /new 创建 Telegram 会话。"
                 + discovery_note,
             )
             return
@@ -250,11 +272,6 @@ class TelegramRouter:
                 return
             selected_id = sessions[index].id
             current_session = await self.database.current_conversation(project.id)
-            try:
-                await self.database.acquire_conversation_lock(selected_id, "telegram")
-            except RuntimeError as error:
-                await self._reply(message, f"暂时无法切换会话：{error}")
-                return
             if current_session is not None and current_session.id != selected_id:
                 await self.database.release_conversation_lock(current_session.id, "telegram")
             selected_session = await self.database.select_conversation(selected_id, project.id)
@@ -327,7 +344,7 @@ class TelegramRouter:
                 "既有上下文保持不变，从下一条任务开始生效。",
             )
             return
-        if command in {"/reasoning", "/effort"}:
+        if command == "/reasoning":
             state = await self._current_model_state()
             if state is None:
                 await self._reply(message, "当前没有可用项目，或Codex模型清单尚未就绪。")
@@ -422,7 +439,7 @@ class TelegramRouter:
                 status_lines.append(f"任务所属项目：{running_name}")
             await self._reply(message, "\n".join(status_lines))
             return
-        if command in {"/security", "/approval"}:
+        if command == "/security":
             await self._handle_security_command(message)
             return
         if command == "/stop":
@@ -455,16 +472,16 @@ class TelegramRouter:
                     # our SQLite lease is not enough for desktop hand-off.
                     await self.release_codex_connection()
                 except Exception as error:
-                    await self._reply(message, f"暂时无法交还给电脑端 Codex：{error}")
+                    await self._reply(message, f"清理异常状态失败：{error}")
                     return
             released = await self.database.release_conversation_lock(
                 conversation.id, "telegram"
             )
             await self._reply(
                 message,
-                "已交还电脑端 Codex。现在可以在电脑端继续使用。"
+                "已清理异常遗留状态。现在可以在电脑端继续使用。"
                 if released
-                else "已断开 Telegram 的 Codex 连接。现在可以在电脑端继续使用。",
+                else "当前没有 Telegram 遗留占用。电脑端可以直接继续使用。",
             )
             return
         if command == "/takeover":
@@ -476,20 +493,11 @@ class TelegramRouter:
             if conversation is None:
                 await self._reply(message, "当前没有选中的会话。")
                 return
-            if await self.database.active_job_count():
-                await self._reply(
-                    message,
-                    "当前会话仍有任务运行。为避免中断副作用，请先使用 /stop，"
-                    "任务结束后再使用 /takeover。",
-                )
-                return
-            try:
-                await self.database.acquire_conversation_lock(conversation.id, "telegram")
-            except RuntimeError as error:
-                await self._reply(message, f"暂时无法接管：{error}")
-                return
-            self._security_confirmations.clear()
-            await self._reply(message, f"已接管会话：{conversation.title}")
+            await self._reply(
+                message,
+                f"Telegram 会话已就绪：{conversation.title}\n"
+                "现在不需要手动接管；任务完成后，电脑端可直接继续。",
+            )
             return
 
         async with self._job_lock:
@@ -545,6 +553,23 @@ class TelegramRouter:
                         images[0].parent.rmdir()
                     except OSError:
                         pass
+
+    @staticmethod
+    def _parse_command(text: str) -> tuple[str, str]:
+        """Normalize a Telegram command while preserving its argument text."""
+        parts = text.strip().split(maxsplit=1)
+        if not parts:
+            return "", ""
+        command = parts[0].casefold()
+        # Telegram may append @bot_username when a command is copied from a
+        # group or another chat. Private-chat commands should behave identically.
+        if command.startswith("/") and "@" in command:
+            command = command.split("@", 1)[0]
+        if command.startswith("/"):
+            name = command.removeprefix("/")
+            command = "/" + TELEGRAM_COMMAND_ALIASES.get(name, name)
+        argument = parts[1].strip() if len(parts) == 2 else ""
+        return command, argument
 
     @staticmethod
     def _selectable_sessions(sessions: list[Conversation]) -> list[Conversation]:
