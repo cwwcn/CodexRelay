@@ -24,7 +24,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gui = ["PySide6-Essentials>=6.9,<7"]
+gui = [
+  "PySide6-Essentials>=6.9,<7",
+  "pyobjc-core>=11.1,<12; sys_platform == 'darwin'",
+  "pyobjc-framework-Cocoa>=11.1,<12; sys_platform == 'darwin'",
+]
 packaging = ["PyInstaller>=6.16,<7"]
 dev = [
   "mypy>=1.17,<2",
@@ -59,3 +63,7 @@ ignore = ["ASYNC240", "RUF001"]
 python_version = "3.12"
 strict = true
 packages = ["codexrelay"]
+
+[[tool.mypy.overrides]]
+module = ["objc", "AppKit", "Foundation"]
+ignore_missing_imports = true

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from codexrelay.connectors.base import IncomingMessage
@@ -20,6 +21,7 @@ class UpdateClient(Protocol):
 
 
 MessageHandler = Callable[[str, IncomingMessage], Awaitable[None]]
+ConnectionHandler = Callable[[datetime], Awaitable[None]]
 
 
 class TelegramPoller:
@@ -29,11 +31,19 @@ class TelegramPoller:
         database: Database,
         client: UpdateClient,
         account_id: str = "main-bot",
+        on_connection_lost: ConnectionHandler | None = None,
+        on_connection_restored: ConnectionHandler | None = None,
+        disconnect_threshold: float = 30,
     ) -> None:
         self.database = database
         self.client = client
         self.account_id = account_id
         self._handler_tasks: set[asyncio.Task[None]] = set()
+        self.on_connection_lost = on_connection_lost
+        self.on_connection_restored = on_connection_restored
+        self.disconnect_threshold = disconnect_threshold
+        self._disconnected_at: datetime | None = None
+        self._disconnect_announced = False
 
     async def recover_pending(self, handler: MessageHandler) -> int:
         pending = await self.database.pending_inbound_events(
@@ -60,6 +70,7 @@ class TelegramPoller:
         )
         offset = int(cursor) if cursor is not None else None
         updates = await self.client.get_updates(offset=offset, poll_timeout=poll_timeout)
+        await self._restore_connection_before_dispatch()
         processed = 0
         for update in updates:
             update_id = update.get("update_id")
@@ -108,6 +119,7 @@ class TelegramPoller:
             except TelegramAPIError as error:
                 delay = float(error.retry_after or min(delay * 2, 30))
             except TelegramTransportError:
+                await self._mark_connection_lost()
                 delay = min(delay * 2, 30)
             try:
                 await asyncio.wait_for(stop.wait(), timeout=delay)
@@ -119,6 +131,29 @@ class TelegramPoller:
     async def wait_for_handlers(self) -> None:
         if self._handler_tasks:
             await asyncio.gather(*tuple(self._handler_tasks), return_exceptions=True)
+
+    async def _mark_connection_lost(self) -> None:
+        now = datetime.now(UTC)
+        if self._disconnected_at is None:
+            self._disconnected_at = now
+        duration = (now - self._disconnected_at).total_seconds()
+        if (
+            duration >= self.disconnect_threshold
+            and not self._disconnect_announced
+            and self.on_connection_lost is not None
+        ):
+            self._disconnect_announced = True
+            await self.on_connection_lost(self._disconnected_at)
+
+    async def _restore_connection_before_dispatch(self) -> None:
+        disconnected_at = self._disconnected_at
+        if disconnected_at is None:
+            return
+        self._disconnected_at = None
+        announced = self._disconnect_announced
+        self._disconnect_announced = False
+        if announced and self.on_connection_restored is not None:
+            await self.on_connection_restored(disconnected_at)
 
     def _spawn_dispatch(
         self, event_id: str, update: dict[str, Any], handler: MessageHandler

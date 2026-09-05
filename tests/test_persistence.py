@@ -269,9 +269,7 @@ async def test_assigning_unassigned_session_rebinds_same_conversation_history(
         )
         before = await database.current_global_conversation()
         assert before is not None and before.project_id is None
-        await database.set_conversation_model(
-            before.id, model="gpt-test", reasoning_effort="high"
-        )
+        await database.set_conversation_model(before.id, model="gpt-test", reasoning_effort="high")
         job_id, _message = await database.create_queued_job_with_input(
             conversation_id=before.id,
             text="preserve this context",
@@ -293,9 +291,7 @@ async def test_assigning_unassigned_session_rebinds_same_conversation_history(
             (before.id,),
         )
         messages = await cursor.fetchall()
-        assert [str(item["content_text"]) for item in messages] == [
-            "preserve this context"
-        ]
+        assert [str(item["content_text"]) for item in messages] == ["preserve this context"]
         assert len(await database.list_all_conversations()) == 1
 
 
@@ -307,9 +303,7 @@ async def test_global_session_index_keeps_disabled_project_classification(
     project_path.mkdir()
     async with Database(tmp_path / "state.db") as database:
         project = await database.add_project(project_path, "Disabled")
-        await database.connection.execute(
-            "UPDATE projects SET enabled=0 WHERE id=?", (project.id,)
-        )
+        await database.connection.execute("UPDATE projects SET enabled=0 WHERE id=?", (project.id,))
         await database.connection.commit()
 
         await database.reconcile_global_threads(
@@ -624,7 +618,7 @@ async def test_schema_v3_migrates_model_settings_without_losing_conversations(
         conversation = await database.conversation("conversation-1")
 
         assert {"model", "reasoning_effort"} <= columns
-        assert version is not None and version["version"] == 9
+        assert version is not None and version["version"] == 10
         assert conversation is not None
         assert conversation.codex_thread_id == "thread-1"
         assert conversation.model is None
@@ -696,7 +690,38 @@ async def test_schema_v7_adds_global_discovered_thread_index(tmp_path: Path) -> 
         "conversation_id",
         "archived_at",
     } <= columns
-    assert version is not None and version["version"] == 9
+    assert version is not None and version["version"] == 10
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_state_and_deferred_inbound_are_persistent(tmp_path: Path) -> None:
+    database_path = tmp_path / "state.db"
+    async with Database(database_path) as database:
+        state = await database.record_lifecycle(
+            "system_sleep",
+            state="offline",
+            reason="system_sleep",
+            occurred_at="2026-09-05T01:00:00+00:00",
+            offline_since="2026-09-05T01:00:00+00:00",
+        )
+        assert state.state == "offline"
+        event_id, inserted = await database.ingest_event(
+            connector_type="telegram",
+            account_id="main-bot",
+            external_event_id="offline-1",
+            payload={"update_id": 1, "message": {"text": "later"}},
+            cursor_name="update_offset",
+            cursor_value="2",
+        )
+        assert inserted
+        assert await database.defer_inbound_event(event_id, "token")
+
+    async with Database(database_path) as database:
+        state = await database.lifecycle_state()
+        assert state is not None and state.offline_since == "2026-09-05T01:00:00+00:00"
+        claimed = await database.claim_deferred_inbound("token", decision="ignored")
+        assert claimed is not None and claimed[0] == event_id
+        assert await database.claim_deferred_inbound("token", decision="ignored") is None
 
 
 @pytest.mark.asyncio

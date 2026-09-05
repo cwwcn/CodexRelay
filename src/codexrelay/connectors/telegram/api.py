@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -301,6 +302,11 @@ def parse_incoming_message(
         images=images,
         callback_data=callback_data,
         callback_query_id=callback_query_id,
+        sent_at=(
+            datetime.fromtimestamp(int(message["date"]), UTC)
+            if isinstance(message.get("date"), int | float)
+            else None
+        ),
     )
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol
 
 
@@ -24,6 +25,7 @@ class IncomingMessage:
     images: tuple[ImageAttachment, ...] = ()
     callback_data: str | None = None
     callback_query_id: str | None = None
+    sent_at: datetime | None = None
 
 
 class Connector(Protocol):

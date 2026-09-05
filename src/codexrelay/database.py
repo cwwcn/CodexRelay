@@ -19,13 +19,14 @@ from codexrelay.models import (
     Conversation,
     GlobalSession,
     JobStatus,
+    LifecycleState,
     MessageRole,
     OutboundMessage,
     Project,
     ProjectApprovalMode,
 )
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 MIGRATION_1 = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -227,6 +228,33 @@ ALTER TABLE conversations ADD COLUMN last_used_at TEXT NOT NULL DEFAULT '';
 ALTER TABLE conversations ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE conversations ADD COLUMN archived_at TEXT NULL;
 ALTER TABLE conversations ADD COLUMN lock_owner TEXT NULL;
+"""
+
+MIGRATION_10 = """
+CREATE TABLE IF NOT EXISTS runtime_state (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    state TEXT NOT NULL,
+    started_at TEXT NULL,
+    last_seen_at TEXT NULL,
+    offline_since TEXT NULL,
+    last_reason TEXT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS lifecycle_events (
+    id TEXT PRIMARY KEY,
+    event_type TEXT NOT NULL,
+    reason TEXT NULL,
+    occurred_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_lifecycle_events_occurred
+ON lifecycle_events(occurred_at DESC);
+
+ALTER TABLE inbound_events ADD COLUMN deferred_token TEXT NULL;
+ALTER TABLE inbound_events ADD COLUMN deferred_status TEXT NULL;
+ALTER TABLE inbound_events ADD COLUMN deferred_at TEXT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_inbound_deferred_token
+ON inbound_events(deferred_token) WHERE deferred_token IS NOT NULL;
 """
 
 MIGRATION_7 = """
@@ -431,9 +459,7 @@ class Database:
                         await connection.execute(
                             "ALTER TABLE conversations ADD COLUMN reasoning_effort TEXT NULL"
                         )
-                    await connection.execute(
-                        "INSERT INTO schema_version(version) VALUES (?)", (4,)
-                    )
+                    await connection.execute("INSERT INTO schema_version(version) VALUES (?)", (4,))
             except BaseException:
                 await connection.rollback()
                 raise
@@ -502,6 +528,46 @@ class Database:
             finally:
                 await connection.execute("PRAGMA legacy_alter_table=OFF")
                 await connection.execute("PRAGMA foreign_keys=ON")
+            version = 9
+        if version < 10:
+            cursor = await connection.execute("PRAGMA table_info(inbound_events)")
+            columns = {str(item[1]) for item in await cursor.fetchall()}
+            await connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS runtime_state (
+                    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                    state TEXT NOT NULL,
+                    started_at TEXT NULL,
+                    last_seen_at TEXT NULL,
+                    offline_since TEXT NULL,
+                    last_reason TEXT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS lifecycle_events (
+                    id TEXT PRIMARY KEY,
+                    event_type TEXT NOT NULL,
+                    reason TEXT NULL,
+                    occurred_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_lifecycle_events_occurred
+                ON lifecycle_events(occurred_at DESC);
+                """
+            )
+            for column, definition in (
+                ("deferred_token", "TEXT NULL"),
+                ("deferred_status", "TEXT NULL"),
+                ("deferred_at", "TEXT NULL"),
+            ):
+                if column not in columns:
+                    await connection.execute(
+                        f"ALTER TABLE inbound_events ADD COLUMN {column} {definition}"
+                    )
+            await connection.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS idx_inbound_deferred_token
+                   ON inbound_events(deferred_token) WHERE deferred_token IS NOT NULL"""
+            )
+            await connection.execute("INSERT INTO schema_version(version) VALUES (?)", (10,))
+            await connection.commit()
 
     async def add_project(self, path: Path, name: str | None = None) -> Project:
         resolved = path.expanduser().resolve(strict=True)
@@ -536,10 +602,7 @@ class Database:
             if state is None or stored is None:
                 raise RuntimeError("failed to read project state after insert")
             stored_id = str(stored["id"])
-            if (
-                state["current_project_id"] is None
-                and state["current_conversation_id"] is None
-            ):
+            if state["current_project_id"] is None and state["current_conversation_id"] is None:
                 await connection.execute(
                     "UPDATE app_state SET current_project_id=? WHERE singleton=1", (stored_id,)
                 )
@@ -909,6 +972,129 @@ class Database:
                 (error_type[:200], event_id),
             )
 
+    async def defer_inbound_event(self, event_id: str, token: str) -> bool:
+        """Persist an offline Telegram task until the owner explicitly decides."""
+        async with self.transaction() as connection:
+            result = await connection.execute(
+                """
+                UPDATE inbound_events
+                SET deferred_token=?, deferred_status='pending', deferred_at=?
+                WHERE id=? AND deferred_status IS NULL
+                """,
+                (token, utc_now(), event_id),
+            )
+        return result.rowcount == 1
+
+    async def claim_deferred_inbound(
+        self, token: str, *, decision: str
+    ) -> tuple[str, dict[str, Any]] | None:
+        """Atomically resolve and return one deferred inbound event."""
+        if decision not in {"executing", "ignored"}:
+            raise ValueError("invalid deferred inbound decision")
+        async with self.transaction() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT id, payload_json FROM inbound_events
+                WHERE deferred_token=? AND deferred_status='pending'
+                """,
+                (token,),
+            )
+            row = await cursor.fetchone()
+            if row is None or row["payload_json"] is None:
+                return None
+            result = await connection.execute(
+                """UPDATE inbound_events SET deferred_status=?
+                   WHERE id=? AND deferred_status='pending'""",
+                (decision, str(row["id"])),
+            )
+            if result.rowcount != 1:
+                return None
+            payload = json.loads(str(row["payload_json"]))
+            if not isinstance(payload, dict):
+                return None
+            return str(row["id"]), payload
+
+    async def finish_deferred_inbound(self, event_id: str) -> None:
+        async with self.transaction() as connection:
+            await connection.execute(
+                """UPDATE inbound_events SET deferred_status='executed'
+                   WHERE id=? AND deferred_status='executing'""",
+                (event_id,),
+            )
+
+    async def retry_deferred_inbound(self, event_id: str) -> None:
+        async with self.transaction() as connection:
+            await connection.execute(
+                """UPDATE inbound_events SET deferred_status='pending'
+                   WHERE id=? AND deferred_status='executing'""",
+                (event_id,),
+            )
+
+    async def record_lifecycle(
+        self,
+        event_type: str,
+        *,
+        state: str,
+        reason: str | None = None,
+        occurred_at: str | None = None,
+        started_at: str | None = None,
+        offline_since: str | None = None,
+    ) -> LifecycleState:
+        now = occurred_at or utc_now()
+        async with self.transaction() as connection:
+            await connection.execute(
+                """INSERT INTO lifecycle_events(id, event_type, reason, occurred_at)
+                   VALUES (?, ?, ?, ?)""",
+                (str(uuid.uuid4()), event_type, reason, now),
+            )
+            await connection.execute(
+                """
+                INSERT INTO runtime_state(
+                    singleton, state, started_at, last_seen_at,
+                    offline_since, last_reason, updated_at
+                ) VALUES (1, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(singleton) DO UPDATE SET
+                    state=excluded.state,
+                    started_at=COALESCE(excluded.started_at, runtime_state.started_at),
+                    last_seen_at=excluded.last_seen_at,
+                    offline_since=excluded.offline_since,
+                    last_reason=excluded.last_reason,
+                    updated_at=excluded.updated_at
+                """,
+                (state, started_at, now, offline_since, reason, now),
+            )
+        current = await self.lifecycle_state()
+        if current is None:
+            raise RuntimeError("lifecycle state was not persisted")
+        return current
+
+    async def heartbeat(self, *, occurred_at: str | None = None) -> None:
+        now = occurred_at or utc_now()
+        async with self.transaction() as connection:
+            await connection.execute(
+                """UPDATE runtime_state SET last_seen_at=?, updated_at=?
+                   WHERE singleton=1""",
+                (now, now),
+            )
+
+    async def lifecycle_state(self) -> LifecycleState | None:
+        cursor = await self.connection.execute(
+            """SELECT state, started_at, last_seen_at, offline_since,
+                      last_reason, updated_at
+               FROM runtime_state WHERE singleton=1"""
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return LifecycleState(
+            state=str(row["state"]),
+            started_at=None if row["started_at"] is None else str(row["started_at"]),
+            last_seen_at=(None if row["last_seen_at"] is None else str(row["last_seen_at"])),
+            offline_since=(None if row["offline_since"] is None else str(row["offline_since"])),
+            last_reason=None if row["last_reason"] is None else str(row["last_reason"]),
+            updated_at=str(row["updated_at"]),
+        )
+
     async def is_authorized_identity(
         self, *, connector_type: str, account_id: str, external_user_id: str
     ) -> bool:
@@ -1025,8 +1211,7 @@ class Database:
         async with self.transaction() as connection:
             if project_id is None:
                 cursor = await connection.execute(
-                    "SELECT id, project_id FROM conversations "
-                    "WHERE id=? AND archived_at IS NULL",
+                    "SELECT id, project_id FROM conversations WHERE id=? AND archived_at IS NULL",
                     (conversation_id,),
                 )
             else:
@@ -1248,10 +1433,7 @@ class Database:
         projects = await self.list_all_projects()
         project_by_id = {project.id: project for project in projects}
         project_roots = sorted(
-            (
-                (project.path.expanduser().resolve(), project)
-                for project in projects
-            ),
+            ((project.path.expanduser().resolve(), project) for project in projects),
             key=lambda item: len(item[0].parts),
             reverse=True,
         )
@@ -1405,8 +1587,7 @@ class Database:
                     )
                 seen.add(thread_id)
             query = (
-                "UPDATE discovered_threads SET archived_at=?, is_active=0 "
-                "WHERE archived_at IS NULL"
+                "UPDATE discovered_threads SET archived_at=?, is_active=0 WHERE archived_at IS NULL"
             )
             parameters: list[str] = [now]
             if seen:
@@ -1460,9 +1641,7 @@ class Database:
                    WHERE singleton=1 AND current_conversation_id IS NULL"""
             )
 
-    async def list_global_sessions(
-        self, *, include_archived: bool = False
-    ) -> list[GlobalSession]:
+    async def list_global_sessions(self, *, include_archived: bool = False) -> list[GlobalSession]:
         archived_clause = "" if include_archived else "WHERE d.archived_at IS NULL"
         cursor = await self.connection.execute(
             f"""
@@ -1650,11 +1829,7 @@ class Database:
                     project = await self.get_project(str(effective_project_id))
                     if project is not None:
                         project_root = project.path.expanduser().resolve()
-                        candidate = (
-                            project_root
-                            if cwd is None
-                            else cwd.expanduser().resolve()
-                        )
+                        candidate = project_root if cwd is None else cwd.expanduser().resolve()
                         effective_cwd = (
                             candidate if _is_within(candidate, project_root) else project_root
                         )
@@ -1685,11 +1860,7 @@ class Database:
                     project = await self.get_project(str(effective_project_id))
                     if project is not None:
                         project_root = project.path.expanduser().resolve()
-                        candidate = (
-                            project_root
-                            if cwd is None
-                            else cwd.expanduser().resolve()
-                        )
+                        candidate = project_root if cwd is None else cwd.expanduser().resolve()
                         effective_cwd = (
                             candidate if _is_within(candidate, project_root) else project_root
                         )
@@ -2712,17 +2883,11 @@ class Database:
             ),
             model=str(row["model"]) if row["model"] is not None else None,
             reasoning_effort=(
-                str(row["reasoning_effort"])
-                if row["reasoning_effort"] is not None
-                else None
+                str(row["reasoning_effort"]) if row["reasoning_effort"] is not None else None
             ),
             scope=str(row["scope"]) if "scope" in row.keys() else "project",
             source=str(row["source"]) if "source" in row.keys() else "telegram",
-            last_used_at=(
-                str(row["last_used_at"])
-                if "last_used_at" in row.keys()
-                else ""
-            ),
+            last_used_at=(str(row["last_used_at"]) if "last_used_at" in row.keys() else ""),
             is_pinned=bool(row["is_pinned"]) if "is_pinned" in row.keys() else False,
             archived_at=(
                 str(row["archived_at"])
@@ -2747,19 +2912,13 @@ class Database:
             codex_updated_at=int(row["codex_updated_at"]),
             is_active=bool(row["is_active"]),
             project_id=str(row["project_id"]) if row["project_id"] is not None else None,
-            project_name=(
-                str(row["project_name"]) if row["project_name"] is not None else None
-            ),
+            project_name=(str(row["project_name"]) if row["project_name"] is not None else None),
             project_enabled=bool(row["project_enabled"]),
             conversation_id=(
-                str(row["conversation_id"])
-                if row["conversation_id"] is not None
-                else None
+                str(row["conversation_id"]) if row["conversation_id"] is not None else None
             ),
             is_current_project=bool(row["is_current_project"]),
             is_current_conversation=bool(row["is_current_conversation"]),
             path_available=bool(row["path_available"]),
-            archived_at=(
-                str(row["archived_at"]) if row["archived_at"] is not None else None
-            ),
+            archived_at=(str(row["archived_at"]) if row["archived_at"] is not None else None),
         )

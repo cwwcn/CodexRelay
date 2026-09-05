@@ -4,6 +4,24 @@
 
 Changes for the next release will be recorded here. / 下一版本的变更将在此记录。
 
+### Local lifecycle and offline recovery / 本地生命周期与离线恢复
+
+- Added persisted online, recovering, and offline runtime states with heartbeat timestamps;
+- Added best-effort Telegram notices for startup, sleep, wake, and explicit shutdown;
+- Added macOS workspace sleep/wake/power-off observation with elapsed-time wake detection fallback;
+- Treated Telegram transport interruptions longer than 30 seconds as offline periods and restored the online boundary before dispatching queued updates;
+- Deferred ordinary Telegram tasks received while the Mac was offline until the user chooses “现在执行” or “忽略”;
+- Kept status and help commands available without replaying stale task side effects;
+- Added lifecycle notification settings and persistent recovery records for future diagnostics.
+
+- 增加在线、恢复中和离线状态及心跳时间的持久化记录；
+- 在启动、睡眠、唤醒和显式退出时尽力通过 Telegram 通知；
+- 接入 macOS 睡眠、唤醒和关机事件，并用时间间隔检测作为兜底；
+- 将超过 30 秒的 Telegram 传输中断纳入离线状态，并在分发积压消息前先恢复在线边界；
+- Mac 离线期间收到的普通 Telegram 任务延迟到用户选择“现在执行”或“忽略”后处理；
+- `/status` 等状态命令仍可用，不会静默重放旧任务的副作用；
+- 增加生命周期通知设置和可供后续诊断中心使用的持久化恢复记录。
+
 ## 0.1.3 - 2026-09-05
 
 ### Global session view / 全局会话视图

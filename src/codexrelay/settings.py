@@ -15,6 +15,7 @@ class AppSection:
     launch_at_login: bool = False
     prevent_sleep_while_running: bool = True
     update_checks_automatically: bool = False
+    lifecycle_notifications: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +59,7 @@ class SettingsStore:
                 launch_at_login=bool(app.get("launch_at_login", False)),
                 prevent_sleep_while_running=bool(app.get("prevent_sleep_while_running", True)),
                 update_checks_automatically=bool(app.get("update_checks_automatically", False)),
+                lifecycle_notifications=bool(app.get("lifecycle_notifications", True)),
             ),
             telegram=TelegramSection(
                 account_id=str(telegram.get("account_id", "main-bot")),

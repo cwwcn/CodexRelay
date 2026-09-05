@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -25,6 +26,7 @@ def test_parse_private_text_and_largest_photo() -> None:
             "message": {
                 "from": {"id": 123},
                 "chat": {"id": 123, "type": "private"},
+                "date": 1788570000,
                 "caption": "Please inspect this screenshot",
                 "photo": [
                     {"file_id": "small", "file_unique_id": "a", "width": 90, "height": 90},
@@ -44,6 +46,7 @@ def test_parse_private_text_and_largest_photo() -> None:
     assert message.external_user_id == "123"
     assert message.text == "Please inspect this screenshot"
     assert message.images[0].external_id == "large"
+    assert message.sent_at == datetime.fromtimestamp(1788570000, UTC)
 
 
 def test_ignore_non_private_messages() -> None:
@@ -186,8 +189,8 @@ def test_telegram_command_registry_drives_help_text() -> None:
         "session",
         "models",
         "model",
-            "reasoning",
-            "status",
+        "reasoning",
+        "status",
         "security",
         "stop",
         "release",

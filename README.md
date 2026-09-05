@@ -33,6 +33,8 @@ Send a task to your Telegram bot and let your own Mac run Codex in the selected 
 - Per-conversation Codex model and reasoning-effort settings;
 - One active task globally; switching conversations is blocked while a task is running;
 - Durable persistence for Codex threads/turns, Telegram inbox/outbox, and task state;
+- Local lifecycle tracking with Telegram notices when the Mac sleeps, wakes, starts, or explicitly shuts down;
+- Offline-task protection: ordinary tasks queued while the Mac is unavailable require an explicit **Run now** or **Ignore** decision after recovery;
 - One-time Telegram approval for dangerous commands, file changes, and extra permissions;
 - Optional per-project “auto-allow within this project” approval mode, protected by explicit confirmation; unassigned conversations remain fully usable and use controlled safe mode for risky operations;
 - Menu bar overview panel, settings window, task stop action, and quit confirmation;
@@ -150,6 +152,8 @@ Full command reference:
 ```
 
 `/help` groups commands into conversation actions, task control, configuration and security, and first-time setup. Project management commands remain accepted as compatibility commands, but project management belongs in the Mac app's **System** page and selecting a conversation should use `/sessions` and `/session`. Before pairing, only `/pair <six-digit code>` is accepted (the BotFather deep-link form `/start pair_<six-digit code>` is also supported); a paired account that sends `/pair` again receives a status message instead of accidentally submitting a Codex task. `/security` shows the current conversation's approval mode; project conversations may opt into “auto-allow within this project” after a second confirmation, while unassigned conversations remain usable and use controlled safe mode for risky operations. `/reasoning` changes the reasoning effort; `/effort` is accepted as a compatibility alias. Settings are stored in CodexRelay's local database and do not modify `~/.codex/config.toml`.
+
+When the Mac sleeps or CodexRelay exits normally, the paired Telegram chat receives a best-effort offline notice. After startup, wake, or a network interruption longer than 30 seconds, CodexRelay verifies both Telegram and Codex before announcing that it is ready. `/status` includes the current lifecycle state, online duration, and latest heartbeat. Ordinary tasks sent while the Mac was offline are never executed silently after recovery; each task presents **Run now** and **Ignore** buttons. Status commands remain available immediately. Power loss, forced shutdown, and system crashes cannot send an instant offline notice, but the next startup estimates the interruption from the last persisted heartbeat.
 
 Project switching is allowed only after the current task finishes. `/use` remains a compatibility command for older workflows; the primary flow is to choose a conversation with `/sessions` and `/session`. Switching a project association does not delete conversation history.
 

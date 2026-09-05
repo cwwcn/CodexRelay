@@ -5,6 +5,7 @@ import logging
 import os
 import platform
 import sys
+import time
 from collections.abc import Callable, Coroutine
 from dataclasses import replace
 from pathlib import Path
@@ -77,6 +78,7 @@ from codexrelay.codex.model_catalog import (
 from codexrelay.connectors.telegram.api import TelegramClient
 from codexrelay.database import Database
 from codexrelay.logging_setup import configure_logging
+from codexrelay.macos_lifecycle import MacLifecycleMonitor
 from codexrelay.models import Conversation, GlobalSession, JobStatus, Project
 from codexrelay.pairing import PairingService
 from codexrelay.paths import AppPaths
@@ -249,16 +251,46 @@ class RuntimeThread(QThread):
         finally:
             self.runtime = None
 
-    def request_stop(self) -> None:
+    def request_stop(self, *, notify_shutdown: bool = False) -> None:
         if self._loop is not None and self._stop is not None:
-            self._loop.call_soon_threadsafe(self._stop.set)
+            if notify_shutdown and self.runtime is not None:
+                future = asyncio.run_coroutine_threadsafe(
+                    self._notify_shutdown_and_stop(), self._loop
+                )
+                future.add_done_callback(self._log_lifecycle_result)
+            else:
+                self._loop.call_soon_threadsafe(self._stop.set)
+
+    async def _notify_shutdown_and_stop(self) -> None:
+        if self.runtime is not None:
+            await self.runtime.notify_shutdown()
+        if self._stop is not None:
+            self._stop.set()
+
+    def notify_sleep(self) -> None:
+        self._submit_lifecycle("sleep")
+
+    def notify_wake(self) -> None:
+        self._submit_lifecycle("wake")
+
+    def notify_shutdown(self) -> None:
+        self._submit_lifecycle("shutdown")
+
+    def _submit_lifecycle(self, event: str) -> None:
+        if self._loop is None or self.runtime is None:
+            return
+        callback = {
+            "sleep": self.runtime.notify_sleep,
+            "wake": self.runtime.notify_wake,
+            "shutdown": self.runtime.notify_shutdown,
+        }[event]
+        future = asyncio.run_coroutine_threadsafe(callback(), self._loop)
+        future.add_done_callback(self._log_lifecycle_result)
 
     def interrupt_current_task(self) -> None:
         if self._loop is None or self.runtime is None or self.runtime.relay is None:
             return
-        future = asyncio.run_coroutine_threadsafe(
-            self.runtime.relay.interrupt_active(), self._loop
-        )
+        future = asyncio.run_coroutine_threadsafe(self.runtime.relay.interrupt_active(), self._loop)
         future.add_done_callback(self._log_interrupt_result)
 
     def sync_sessions(self) -> None:
@@ -288,6 +320,13 @@ class RuntimeThread(QThread):
             LOGGER.info("current task interrupt requested; active=%s", future.result())
         except Exception as error:
             LOGGER.warning("current task interrupt failed: %s: %s", type(error).__name__, error)
+
+    @staticmethod
+    def _log_lifecycle_result(future: Any) -> None:
+        try:
+            future.result()
+        except Exception as error:
+            LOGGER.warning("lifecycle event failed: %s: %s", type(error).__name__, error)
 
 
 class UpdateDialog(QDialog):
@@ -390,9 +429,7 @@ class UpdateDialog(QDialog):
                 self.progress_bar.setRange(0, 1000)
                 self.progress_bar.setValue(round(percentage * 10))
             else:
-                self.rows["progress"].setText(
-                    f"已下载 {format_bytes(state.downloaded_bytes)}"
-                )
+                self.rows["progress"].setText(f"已下载 {format_bytes(state.downloaded_bytes)}")
                 self.progress_bar.setRange(0, 0)
             self.progress_bar.show()
         else:
@@ -689,11 +726,9 @@ class QuitConfirmationDialog(QDialog):
         self.title_label = QLabel("当前任务仍在运行" if active_count else "退出 CodexRelay？")
         self.title_label.setObjectName("quitTitle")
         self.message_label = QLabel(
-            "退出会中断当前 Codex 任务。\n"
-            "任务会标记为“已中断”。项目和会话数据会保留。"
+            "退出会中断当前 Codex 任务。\n任务会标记为“已中断”。项目和会话数据会保留。"
             if active_count
-            else "退出后，Telegram 将暂时无法连接这台 Mac。\n"
-            "已保存的项目和会话会保留到下次启动。"
+            else "退出后，Telegram 将暂时无法连接这台 Mac。\n已保存的项目和会话会保留到下次启动。"
         )
         self.message_label.setObjectName("quitMessage")
         self.message_label.setWordWrap(True)
@@ -896,9 +931,7 @@ class MenuOverview(QWidget):
             " font-size: 12px; font-weight: 700;"
         )
         self.identity.setText(
-            f"@{snapshot.bot_username}"
-            if snapshot.bot_username
-            else "Telegram 尚未连接"
+            f"@{snapshot.bot_username}" if snapshot.bot_username else "Telegram 尚未连接"
         )
         self.project.setText(snapshot.current_project or "尚未选择")
         if snapshot.conversation_title:
@@ -926,8 +959,10 @@ class MenuOverview(QWidget):
             )
         else:
             self.task_detail.setText("没有运行中的任务")
-        task_state = "attention" if snapshot.active_job_status is JobStatus.WAITING_APPROVAL else (
-            "running" if snapshot.active_job_count else "idle"
+        task_state = (
+            "attention"
+            if snapshot.active_job_status is JobStatus.WAITING_APPROVAL
+            else ("running" if snapshot.active_job_count else "idle")
         )
         self.task_dot.set_state(task_state)
         if snapshot.last_error:
@@ -1185,13 +1220,9 @@ class SettingsWindow(QMainWindow):
         # The gutter is painted as a second selection column and creates an
         # unexpected blue strip beside selected sessions on macOS.
         self.global_session_list.setIndentation(0)
-        self.global_session_list.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
+        self.global_session_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.global_session_list.setTextElideMode(Qt.TextElideMode.ElideMiddle)
-        self.global_session_list.itemSelectionChanged.connect(
-            self._global_session_selected
-        )
+        self.global_session_list.itemSelectionChanged.connect(self._global_session_selected)
         layout.addWidget(self.global_session_list, 1)
 
         action_bar = QFrame()
@@ -1265,8 +1296,7 @@ class SettingsWindow(QMainWindow):
         layout.addWidget(self.model_description)
 
         safety_note = QLabel(
-            "仅作用于 CodexRelay，不修改 Codex 全局配置。"
-            "切换项目自动恢复；任务运行中锁定。"
+            "仅作用于 CodexRelay，不修改 Codex 全局配置。切换项目自动恢复；任务运行中锁定。"
         )
         safety_note.setObjectName("hint")
         safety_note.setWordWrap(True)
@@ -1359,6 +1389,9 @@ class SettingsWindow(QMainWindow):
         self.prevent_sleep = QCheckBox("任务运行期间阻止Mac自动睡眠")
         self.prevent_sleep.setChecked(self.settings.app.prevent_sleep_while_running)
         self.prevent_sleep.setMinimumHeight(28)
+        self.lifecycle_notifications = QCheckBox("通过Telegram通知Mac上线与离线状态")
+        self.lifecycle_notifications.setChecked(self.settings.app.lifecycle_notifications)
+        self.lifecycle_notifications.setMinimumHeight(28)
         self.launch_at_login = QCheckBox("登录Mac时启动CodexRelay")
         self.launch_at_login.setChecked(self.startup_service.enabled)
         self.launch_at_login.setEnabled(self.startup_service.available)
@@ -1375,6 +1408,7 @@ class SettingsWindow(QMainWindow):
         save_button.clicked.connect(self._save_system_settings)
         runtime_layout.addWidget(self.auto_connect)
         runtime_layout.addWidget(self.prevent_sleep)
+        runtime_layout.addWidget(self.lifecycle_notifications)
         runtime_layout.addWidget(self.launch_at_login)
         runtime_actions = QHBoxLayout()
         runtime_actions.setContentsMargins(0, 2, 0, 0)
@@ -1547,6 +1581,7 @@ class SettingsWindow(QMainWindow):
                 launch_at_login=self.settings.app.launch_at_login,
                 prevent_sleep_while_running=self.settings.app.prevent_sleep_while_running,
                 update_checks_automatically=self.auto_update_checks.isChecked(),
+                lifecycle_notifications=self.lifecycle_notifications.isChecked(),
             ),
             telegram=self.settings.telegram,
             projects=self.settings.projects,
@@ -2006,9 +2041,7 @@ class SettingsWindow(QMainWindow):
             self.project_selector.setEnabled(has_projects)
             self.current_project_button.setEnabled(has_projects)
             if has_projects:
-                self.project_selector.setToolTip(
-                    "选择一个已授权项目，然后设为当前项目"
-                )
+                self.project_selector.setToolTip("选择一个已授权项目，然后设为当前项目")
                 self.project_summary.setText(
                     f"已授权 {len(projects)} 个项目 · 当前：{current_name}"
                 )
@@ -2312,9 +2345,7 @@ class SettingsWindow(QMainWindow):
 
         def finished(value: object) -> None:
             self._load_projects()
-            found, disabled = (
-                value if isinstance(value, tuple) and len(value) == 2 else (0, 0)
-            )
+            found, disabled = value if isinstance(value, tuple) and len(value) == 2 else (0, 0)
             self.overview_message.setText(
                 f"扫描完成：新增或确认 {found} 个项目，隐藏 {disabled} 个失效路径。"
             )
@@ -2342,6 +2373,7 @@ class SettingsWindow(QMainWindow):
                 launch_at_login=self.launch_at_login.isChecked(),
                 prevent_sleep_while_running=self.prevent_sleep.isChecked(),
                 update_checks_automatically=self.settings.app.update_checks_automatically,
+                lifecycle_notifications=self.lifecycle_notifications.isChecked(),
             ),
             telegram=self.settings.telegram,
             projects=self.settings.projects,
@@ -2507,11 +2539,19 @@ class TrayApplication(QObject):
             about_action=about_action,
         )
         self.window.runtime_configuration_changed.connect(self.apply_runtime_configuration)
+        self.lifecycle_monitor = MacLifecycleMonitor(
+            on_sleep=self._system_will_sleep,
+            on_wake=self._system_did_wake,
+            on_power_off=self._system_will_power_off,
+        )
+        self.lifecycle_monitor.start()
+        self._last_clock_tick = time.time()
         self.tray.show()
 
         self.status_timer = QTimer(self)
         self.status_timer.setInterval(2000)
         self.status_timer.timeout.connect(self.refresh_snapshot)
+        self.status_timer.timeout.connect(self._detect_wake_gap)
         self.status_timer.start()
         self.refresh_snapshot()
         if self.window.settings.app.update_checks_automatically:
@@ -2672,6 +2712,25 @@ class TrayApplication(QObject):
         LOGGER.info("starting relay runtime")
         thread.start()
 
+    def _system_will_sleep(self) -> None:
+        if self.runtime_thread is not None:
+            self.runtime_thread.notify_sleep()
+
+    def _system_did_wake(self) -> None:
+        if self.runtime_thread is not None:
+            self.runtime_thread.notify_wake()
+
+    def _detect_wake_gap(self) -> None:
+        now = time.time()
+        elapsed = now - self._last_clock_tick
+        self._last_clock_tick = now
+        if elapsed > 20:
+            self._system_did_wake()
+
+    def _system_will_power_off(self) -> None:
+        if self.runtime_thread is not None:
+            self.runtime_thread.notify_shutdown()
+
     def restart_runtime(self) -> None:
         if self._quitting:
             return
@@ -2806,7 +2865,7 @@ class TrayApplication(QObject):
         if thread is None or not thread.isRunning():
             self._finalize_quit()
             return
-        thread.request_stop()
+        thread.request_stop(notify_shutdown=True)
         QTimer.singleShot(35_000, self._quit_timeout)
 
     def _quit_timeout(self) -> None:
@@ -2833,6 +2892,7 @@ class TrayApplication(QObject):
         if not self._quitting:
             return
         LOGGER.info("CodexRelay is quitting")
+        self.lifecycle_monitor.stop()
         self.tray.hide()
         self.application.quit()
 

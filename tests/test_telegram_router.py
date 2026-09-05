@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -9,7 +10,7 @@ import pytest
 from codexrelay.codex.base import DesktopThread
 from codexrelay.codex.model_catalog import CodexModelCatalog, CodexModelOption
 from codexrelay.connectors.base import ImageAttachment, IncomingMessage
-from codexrelay.connectors.telegram.api import TelegramClient
+from codexrelay.connectors.telegram.api import TelegramClient, parse_incoming_message
 from codexrelay.connectors.telegram.router import TelegramRouter
 from codexrelay.core import RelayService
 from codexrelay.database import Database
@@ -50,6 +51,17 @@ class UnusedRelay:
         raise AssertionError("commands should not run Codex")
 
 
+class RecordingRelay:
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+
+    async def run_current_conversation(self, **kwargs: Any) -> None:
+        self.texts.append(cast(str, kwargs["text"]))
+
+    async def interrupt_active(self) -> bool:
+        return False
+
+
 class DesktopThreadBackend:
     def __init__(self, threads: list[DesktopThread]) -> None:
         self.threads = threads
@@ -67,9 +79,7 @@ class ImageTelegramClient:
         assert file_id == "photo-1"
         return "photos/photo-1.jpg"
 
-    async def download_file(
-        self, *, file_path: str, destination: Path, max_bytes: int
-    ) -> int:
+    async def download_file(self, *, file_path: str, destination: Path, max_bytes: int) -> int:
         assert file_path == "photos/photo-1.jpg"
         assert max_bytes == 1024
         destination.parent.mkdir(parents=True)
@@ -141,13 +151,11 @@ class CallbackResolver:
     def __init__(self, decision: Literal["accept", "decline"]) -> None:
         self.decision = decision
 
-    async def resolve_callback(
-        self, _callback_data: str
-    ) -> Literal["accept", "decline"]:
+    async def resolve_callback(self, _callback_data: str) -> Literal["accept", "decline"]:
         return self.decision
 
 
-def message(text: str) -> IncomingMessage:
+def message(text: str, *, sent_at: datetime | None = None) -> IncomingMessage:
     return IncomingMessage(
         connector_type="telegram",
         account_id="main-bot",
@@ -156,6 +164,7 @@ def message(text: str) -> IncomingMessage:
         external_conversation_id="123",
         sender_display_name="Owner",
         text=text,
+        sent_at=sent_at,
     )
 
 
@@ -308,9 +317,7 @@ async def test_sessions_syncs_desktop_threads_idempotently_and_selects_one(
         await router.handle("event-sessions-2", message("/sessions"))
         sessions = await database.list_conversations(project.id)
         assert len(sessions) == 3
-        visible_sessions = [
-            session for session in sessions if session.codex_thread_id is not None
-        ]
+        visible_sessions = [session for session in sessions if session.codex_thread_id is not None]
         assert len(visible_sessions) == 2
         assert {session.codex_thread_id for session in visible_sessions} == {
             "desktop-thread-1",
@@ -651,10 +658,7 @@ async def test_security_command_requires_confirmation_and_sets_project_mode(
         )
         await router.handle("event-security-confirm", confirm_callback)
 
-        assert (
-            await database.project_approval_mode(project.id)
-            is ProjectApprovalMode.PROJECT_AUTO
-        )
+        assert await database.project_approval_mode(project.id) is ProjectApprovalMode.PROJECT_AUTO
         assert client.answers == [
             ("callback-auto", "已收到"),
             ("callback-confirm", "已收到"),
@@ -893,3 +897,114 @@ async def test_recovered_inbox_does_not_replay_an_uncertain_prior_job(
         )
         assert len(pending) == 1
         assert "没有自动重放" in pending[0].payload_json
+
+
+@pytest.mark.asyncio
+async def test_task_received_before_runtime_online_is_deferred(tmp_path: Path) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    async with Database(tmp_path / "state.db") as database:
+        project = await database.add_project(project_path)
+        await authorize(database)
+        await database.get_or_create_active_conversation(project.id)
+        router = TelegramRouter(
+            database=database,
+            client=cast(TelegramClient, UnusedTelegramClient()),
+            relay=cast(RelayService, UnusedRelay()),
+            pairing=PairingService(database),
+            project_service=ProjectService(database),
+            temporary_directory=tmp_path / "temp",
+        )
+        router.set_online_since(datetime.now(UTC))
+        event_id, _ = await database.ingest_event(
+            connector_type="telegram",
+            account_id="main-bot",
+            external_event_id="offline-event",
+            payload={"update_id": 1},
+            cursor_name="update_offset",
+            cursor_value="2",
+        )
+        await router.handle(
+            event_id,
+            message("do not run yet", sent_at=datetime.now(UTC) - timedelta(hours=2)),
+        )
+        pending = await database.pending_outbound_messages(
+            connector_type="telegram", account_id="main-bot"
+        )
+        assert len(pending) == 1
+        assert "发送于 Mac 离线期间" in pending[0].payload_json
+        cursor = await database.connection.execute(
+            "SELECT deferred_status FROM inbound_events WHERE id=?", (event_id,)
+        )
+        row = await cursor.fetchone()
+        assert row is not None and row["deferred_status"] == "pending"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("action", "expected_calls"), [("run", 1), ("ignore", 0)])
+async def test_deferred_task_requires_one_explicit_decision(
+    tmp_path: Path, action: str, expected_calls: int
+) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    async with Database(tmp_path / "state.db") as database:
+        project = await database.add_project(project_path)
+        await authorize(database)
+        await database.get_or_create_active_conversation(project.id)
+        relay = RecordingRelay()
+        client = CallbackTelegramClient()
+        router = TelegramRouter(
+            database=database,
+            client=cast(TelegramClient, client),
+            relay=cast(RelayService, relay),
+            pairing=PairingService(database),
+            project_service=ProjectService(database),
+            temporary_directory=tmp_path / "temp",
+        )
+        online = datetime.now(UTC)
+        router.set_online_since(online)
+        payload = {
+            "update_id": 91,
+            "message": {
+                "from": {"id": 123, "first_name": "Owner"},
+                "chat": {"id": 123, "type": "private"},
+                "date": int((online - timedelta(hours=1)).timestamp()),
+                "text": "deferred work",
+            },
+        }
+        event_id, _ = await database.ingest_event(
+            connector_type="telegram",
+            account_id="main-bot",
+            external_event_id="91",
+            payload=payload,
+            cursor_name="update_offset",
+            cursor_value="92",
+        )
+        original = parse_incoming_message(payload)
+        assert original is not None
+        await router.handle(event_id, original)
+        cursor = await database.connection.execute(
+            "SELECT deferred_token FROM inbound_events WHERE id=?", (event_id,)
+        )
+        row = await cursor.fetchone()
+        assert row is not None
+        token = str(row["deferred_token"])
+        callback = IncomingMessage(
+            connector_type="telegram",
+            account_id="main-bot",
+            external_event_id="92",
+            external_user_id="123",
+            external_conversation_id="123",
+            sender_display_name="Owner",
+            text="",
+            callback_data=f"offline:{action}:{token}",
+            callback_query_id="callback-offline",
+        )
+        await router.handle("callback-event", callback)
+        await router.handle("callback-event-again", callback)
+
+        assert len(relay.texts) == expected_calls
+        assert client.answers == [
+            ("callback-offline", "已收到"),
+            ("callback-offline", "已收到"),
+        ]

@@ -16,7 +16,7 @@ from codexrelay.codex.model_catalog import (
     reasoning_effort_label,
 )
 from codexrelay.connectors.base import IncomingMessage
-from codexrelay.connectors.telegram.api import TelegramClient
+from codexrelay.connectors.telegram.api import TelegramClient, parse_incoming_message
 from codexrelay.connectors.telegram.commands import (
     TELEGRAM_COMMAND_ALIASES,
     help_text,
@@ -34,9 +34,7 @@ PAIR_PATTERN = re.compile(r"^/(?:pair\s+|start\s+pair_)(\d{6})$")
 
 
 class ApprovalResolver(Protocol):
-    async def resolve_callback(
-        self, callback_data: str
-    ) -> Literal["accept", "decline"] | None: ...
+    async def resolve_callback(self, callback_data: str) -> Literal["accept", "decline"] | None: ...
 
 
 class TelegramRouter:
@@ -68,14 +66,29 @@ class TelegramRouter:
         self.release_codex_connection = release_codex_connection
         self._job_lock = asyncio.Lock()
         self._security_confirmations: dict[str, tuple[str, str, str, datetime]] = {}
+        self._online_since: datetime | None = None
 
-    async def handle(self, event_id: str, message: IncomingMessage) -> None:
+    def set_online_since(self, value: datetime) -> None:
+        self._online_since = value.astimezone(UTC)
+
+    async def handle(
+        self,
+        event_id: str,
+        message: IncomingMessage,
+        *,
+        allow_deferred: bool = False,
+    ) -> None:
         authorized = await self.database.is_authorized_identity(
             connector_type="telegram",
             account_id=message.account_id,
             external_user_id=message.external_user_id,
         )
         if message.callback_data is not None:
+            if authorized and message.callback_data.startswith("offline:"):
+                if message.callback_query_id is not None:
+                    await self.client.answer_callback_query(message.callback_query_id, "已收到")
+                await self._handle_offline_callback(message)
+                return
             if authorized and message.callback_data.startswith("security:"):
                 if message.callback_query_id is not None:
                     await self.client.answer_callback_query(message.callback_query_id, "已收到")
@@ -116,6 +129,9 @@ class TelegramRouter:
             return
 
         command, argument = self._parse_command(message.text)
+        if not allow_deferred and not command.startswith("/") and self._is_offline_task(message):
+            await self._defer_offline_task(event_id, message)
+            return
         if command.startswith("/") and command.removeprefix("/") not in recognized_command_names():
             await self._reply(
                 message,
@@ -129,8 +145,7 @@ class TelegramRouter:
         if command == "/pair":
             await self._reply(
                 message,
-                "当前 Telegram 账号已经完成配对。"
-                "如需更换账号，请在 Mac 端重新生成一次性配对码。",
+                "当前 Telegram 账号已经完成配对。如需更换账号，请在 Mac 端重新生成一次性配对码。",
             )
             return
         if command == "/projects":
@@ -169,9 +184,7 @@ class TelegramRouter:
                     selector = projects[int(selector) - 1].id
                 previous_session = await self.database.current_global_conversation()
                 if previous_session is not None:
-                    await self.database.release_conversation_lock(
-                        previous_session.id, "telegram"
-                    )
+                    await self.database.release_conversation_lock(previous_session.id, "telegram")
                 try:
                     selected = await self.project_service.switch(selector)
                 except (ValueError, RuntimeError) as error:
@@ -378,9 +391,7 @@ class TelegramRouter:
                 )
                 source_label = self._conversation_source_label(status_conversation.source)
                 conversation_status = (
-                    f"会话：{status_conversation.title}\n"
-                    f"会话来源：{source_label}\n"
-                    f"会话状态：{lock}"
+                    f"会话：{status_conversation.title}\n会话来源：{source_label}\n会话状态：{lock}"
                 )
             running_project = await self.database.active_job_project()
             running_name = running_project.name if running_project is not None else None
@@ -405,13 +416,30 @@ class TelegramRouter:
                     f"推理强度：{reasoning_effort_label(effort)} ({effort})"
                 )
             status_lines = [
-                f"会话归属：{name}"
-                + (f"\n当前项目：{name}" if project is not None else ""),
+                f"会话归属：{name}" + (f"\n当前项目：{name}" if project is not None else ""),
                 conversation_status,
                 model_status,
                 approval_status,
                 f"运行中任务：{active_jobs}",
             ]
+            lifecycle = await self.database.lifecycle_state()
+            if lifecycle is not None:
+                lifecycle_label = {
+                    "online": "在线并就绪",
+                    "recovering": "正在恢复连接",
+                    "offline": "离线",
+                }.get(lifecycle.state, lifecycle.state)
+                status_lines.append(f"连接状态：{lifecycle_label}")
+                started = self._parse_time(lifecycle.started_at)
+                if lifecycle.state == "online" and started is not None:
+                    status_lines.append(
+                        f"本次在线：{self._format_elapsed(datetime.now(UTC) - started)}"
+                    )
+                last_seen = self._parse_time(lifecycle.last_seen_at)
+                if last_seen is not None:
+                    status_lines.append(
+                        f"最近心跳：{last_seen.astimezone().strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
             if running_name is not None:
                 status_lines.append(f"任务所属项目：{running_name}")
             await self._reply(message, "\n".join(status_lines))
@@ -546,6 +574,84 @@ class TelegramRouter:
                     except OSError:
                         pass
 
+    def _is_offline_task(self, message: IncomingMessage) -> bool:
+        if self._online_since is None or message.sent_at is None:
+            return False
+        return message.sent_at < self._online_since - timedelta(seconds=5)
+
+    async def _defer_offline_task(self, event_id: str, message: IncomingMessage) -> None:
+        token = secrets.token_urlsafe(12)
+        if not await self.database.defer_inbound_event(event_id, token):
+            return
+        sent_at = message.sent_at or datetime.now(UTC)
+        preview = message.text.strip().replace("\n", " ")
+        if len(preview) > 80:
+            preview = preview[:77] + "…"
+        await self._reply(
+            message,
+            "这条任务发送于 Mac 离线期间，尚未执行。\n"
+            f"发送时间：{sent_at.astimezone().strftime('%Y-%m-%d %H:%M')}\n"
+            f"内容：{preview or '[图片任务]'}",
+            reply_markup={
+                "inline_keyboard": [
+                    [
+                        {"text": "现在执行", "callback_data": f"offline:run:{token}"},
+                        {"text": "忽略", "callback_data": f"offline:ignore:{token}"},
+                    ]
+                ]
+            },
+        )
+
+    async def _handle_offline_callback(self, message: IncomingMessage) -> None:
+        data = message.callback_data or ""
+        action, separator, token = data.removeprefix("offline:").partition(":")
+        if not separator or action not in {"run", "ignore"}:
+            await self._reply(message, "此离线任务操作无效。")
+            return
+        decision = "executing" if action == "run" else "ignored"
+        claimed = await self.database.claim_deferred_inbound(token, decision=decision)
+        if claimed is None:
+            await self._reply(message, "这条离线任务已经处理或已失效。")
+            return
+        event_id, payload = claimed
+        if action == "ignore":
+            await self._reply(message, "已忽略这条离线期间的任务。")
+            return
+        original = parse_incoming_message(payload, account_id=message.account_id)
+        if original is None or original.external_user_id != message.external_user_id:
+            await self.database.retry_deferred_inbound(event_id)
+            await self._reply(message, "无法恢复原任务，请重新发送。")
+            return
+        await self._reply(message, "已确认，现在执行这条离线任务。")
+        try:
+            await self.handle(event_id, original, allow_deferred=True)
+        except Exception:
+            await self.database.retry_deferred_inbound(event_id)
+            raise
+        else:
+            await self.database.finish_deferred_inbound(event_id)
+
+    @staticmethod
+    def _parse_time(value: str | None) -> datetime | None:
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+    @staticmethod
+    def _format_elapsed(value: timedelta) -> str:
+        seconds = max(int(value.total_seconds()), 0)
+        hours, remainder = divmod(seconds, 3600)
+        minutes = remainder // 60
+        if hours:
+            return f"{hours} 小时 {minutes} 分钟"
+        if minutes:
+            return f"{minutes} 分钟"
+        return "不到 1 分钟"
+
     @staticmethod
     def _parse_command(text: str) -> tuple[str, str]:
         """Normalize a Telegram command while preserving its argument text."""
@@ -580,8 +686,7 @@ class TelegramRouter:
         project_count = len({item.project_id for item in sessions if item.project_id})
         unassigned_count = sum(item.is_unassigned for item in sessions)
         lines = [
-            f"全部会话（{len(sessions)}） · {project_count} 个项目 · "
-            f"{unassigned_count} 个未归属"
+            f"全部会话（{len(sessions)}） · {project_count} 个项目 · {unassigned_count} 个未归属"
         ]
         current_group: str | None = None
         for index, session in enumerate(sessions, start=1):
@@ -725,11 +830,7 @@ class TelegramRouter:
             connector_type=message.connector_type,
             account_id=message.account_id,
         )
-        mode_label = (
-            "本项目内自动允许"
-            if mode is ProjectApprovalMode.PROJECT_AUTO
-            else "安全模式"
-        )
+        mode_label = "本项目内自动允许" if mode is ProjectApprovalMode.PROJECT_AUTO else "安全模式"
         await self._reply(
             message,
             f"当前项目：{project.name}\n当前审批模式：{mode_label}\n\n"
@@ -776,10 +877,12 @@ class TelegramRouter:
                 "开启后，Codex 将自动批准当前项目目录内的文件修改和命令执行，\n"
                 "不再逐项请求确认。\n\n这会降低安全性，确定开启吗？",
                 reply_markup={
-                    "inline_keyboard": [[
-                        {"text": "确认开启", "callback_data": f"security:confirm:{token}"},
-                        {"text": "取消", "callback_data": "security:cancel"},
-                    ]]
+                    "inline_keyboard": [
+                        [
+                            {"text": "确认开启", "callback_data": f"security:confirm:{token}"},
+                            {"text": "取消", "callback_data": "security:cancel"},
+                        ]
+                    ]
                 },
             )
             return

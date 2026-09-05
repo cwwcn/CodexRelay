@@ -103,3 +103,13 @@ class OutboundMessage:
     external_conversation_id: str
     payload_json: str
     attempt_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class LifecycleState:
+    state: str
+    started_at: str | None
+    last_seen_at: str | None
+    offline_since: str | None
+    last_reason: str | None
+    updated_at: str
