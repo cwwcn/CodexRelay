@@ -2,6 +2,10 @@
 
 ## Unreleased / 未发布
 
+Changes for the next release will be recorded here. / 下一版本的变更将在此记录。
+
+## 0.1.3 - 2026-09-05
+
 ### Global session view / 全局会话视图
 
 - Added a global Codex session index with project, unassigned, unavailable-path, and recoverable archival states;

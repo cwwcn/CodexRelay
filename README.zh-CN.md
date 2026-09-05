@@ -16,7 +16,7 @@ CodexRelay 是一个 macOS 菜单栏应用：Telegram 负责远程交互，本�
 
 [English](README.md) | 简体中文 | [文档](docs/)
 
-> **当前版本：** `v0.1.2`
+> **当前版本：** `v0.1.3`
 >
 > 当前版本同时面向 Apple Silicon 和 Intel Mac。发布包使用 ad-hoc 签名，尚未完成 Apple 公证；下方提供首次打开时 macOS 安全确认的操作说明。
 

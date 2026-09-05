@@ -16,7 +16,7 @@ CodexRelay is a macOS menu bar app that connects Telegram with a local Codex run
 
 English | [简体中文](README.zh-CN.md) | [Documentation](docs/)
 
-> **Current release:** `v0.1.2`
+> **Current release:** `v0.1.3`
 >
 > This release targets Apple Silicon and Intel Macs. The distributed app is ad-hoc signed and is not yet Apple-notarized; the first-launch instructions below explain the one-time macOS security confirmation.
 

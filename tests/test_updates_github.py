@@ -67,11 +67,11 @@ def test_provider_reports_latest_when_release_is_not_newer(monkeypatch: Any) -> 
 def test_provider_detects_same_version_rebuilt_asset(monkeypatch: Any) -> None:
     payload = [
         {
-            "tag_name": "v0.1.2",
+                "tag_name": "v0.1.3",
             "html_url": "https://example.test/release",
             "assets": [
                 {
-                    "name": "CodexRelay-macos-arm64-v0.1.2.dmg",
+                        "name": "CodexRelay-macos-arm64-v0.1.3.dmg",
                     "browser_download_url": "https://example.test/fixed.dmg",
                     "digest": "sha256:" + "c" * 64,
                     "updated_at": "2026-09-02T09:52:24Z",
@@ -84,18 +84,18 @@ def test_provider_detects_same_version_rebuilt_asset(monkeypatch: Any) -> None:
 
     state = GitHubReleaseUpdateProvider().check_for_updates()
 
-    assert state.available_version == "0.1.2"
-    assert state.asset_name == "CodexRelay-macos-arm64-v0.1.2.dmg"
+    assert state.available_version == "0.1.3"
+    assert state.asset_name == "CodexRelay-macos-arm64-v0.1.3.dmg"
     assert "修复版" in state.message
 
 
 def test_provider_does_not_detect_older_same_version_asset(monkeypatch: Any) -> None:
     payload = [
         {
-            "tag_name": "v0.1.2",
+            "tag_name": "v0.1.3",
             "assets": [
                 {
-                    "name": "CodexRelay-macos-arm64-v0.1.2.dmg",
+                    "name": "CodexRelay-macos-arm64-v0.1.3.dmg",
                     "browser_download_url": "https://example.test/old.dmg",
                     "digest": "sha256:" + "d" * 64,
                     "updated_at": "2026-09-02T09:00:00Z",
