@@ -488,4 +488,4 @@ CodexRelay 只保存自己的项目、会话和模型设置，不读取后回写
 
 ## 18. 许可证
 
-CodexRelay 采用 MIT License。贡献者在提交代码、文档或设计时，应同时遵守仓库中的 `CONTRIBUTING.md` 和 `SECURITY.md`。
+CodexRelay 采用 MIT License。提交代码、文档或设计时，请先阅读 README 中的项目说明，并通过 GitHub Issues 或 Security advisories 提交反馈。

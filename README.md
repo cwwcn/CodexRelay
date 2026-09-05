@@ -14,7 +14,7 @@
 
 CodexRelay is a macOS menu bar app that connects Telegram with a local Codex runtime. Your Mac executes work in the selected conversation's working directory, while Telegram provides remote conversation, approvals, and status updates. Conversations, optional project associations, context, model settings, and approval state stay on your Mac.
 
-English | [简体中文](README.zh-CN.md) | [Documentation](docs/)
+English | [Documentation](docs/)
 
 > **Current release:** `v0.1.2`
 >
@@ -210,8 +210,6 @@ The build script places intermediate files and the app bundle in `artifacts/` an
 - [Technical design](docs/CodexRelay-技术方案.md)
 - [macOS product-shape research](docs/macos-product-redesign-research.md)
 - [Menu bar design research](docs/menu-bar-design-research.md)
-- [Contributing guide](CONTRIBUTING.md)
-- [Security policy](SECURITY.md)
 - [Changelog](CHANGELOG.md)
 
 ## License
