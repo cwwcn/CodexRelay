@@ -27,7 +27,7 @@ dependencies = [
 gui = [
   "PySide6-Essentials>=6.9,<7",
   "pyobjc-core>=11.1,<12; sys_platform == 'darwin'",
-  "pyobjc-framework-Cocoa>=11.1,<12; sys_platform == 'darwin'",
+  "pyobjc-framework-Cocoa>=11.1,<13; sys_platform == 'darwin'",
 ]
 packaging = ["PyInstaller>=6.16,<7"]
 dev = [
